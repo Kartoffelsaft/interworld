@@ -1,12 +1,14 @@
-#ifndef TESTING
+#ifdef BUILD_FOR_TIC
 #include "tic80.h"
 #else
 #include "tic80mock.h"
-#endif
-#include <math.h>
+#ifdef TESTING
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#endif
+#endif
+#include <math.h>
 
 #define SECONDS_PER_FRAME (1.0/60)
 uint8_t lastButtonInputs = 0; // btnp doesn't seem to be working right
@@ -226,13 +228,14 @@ int writeFloat(char* buf, float x) {
 Mtx33 playerRot = MATRIX33_IDENTITY;
 Vec3 playerPos = {0, 0, -50};
 float playerSpeed = 0;
-int8_t menuOpt = 0;
-#define MENU_OPT_COUNT 3
 
+int8_t menuOpt = 0;
+#define MENU_OPT_COUNT 8
 uint8_t enabledMenuOpts = 0;
 #define MENU_OPTION_DAMPENERS 0x01
 #define MENU_OPTION_ORRERY 0x02
 #define MENU_OPTION_MAP 0x04
+#define MENU_OPTION_DEBUG 0x80
 
 typedef struct {
     bool show;
@@ -245,8 +248,23 @@ typedef struct {
 DeferredPOI deferredPOIs[MAX_DEFERRED_POINTS_OF_INTEREST] = {0};
 
 Vec2 screenShake;
-void drawCockpit() {
+
+void drawBackHud() {
     uint8_t transparentColor = 0;
+
+    if (enabledMenuOpts & MENU_OPTION_DEBUG) {
+        char buf[64] = {0};
+
+        writeFloat(buf, playerSpeed);
+        print(buf, 120, 10, 5, false, 1, false);
+
+        writeFloat(buf, playerPos.x);
+        print(buf, 80, 10, 5, false, 1, false);
+        writeFloat(buf, playerPos.y);
+        print(buf, 80, 20, 5, false, 1, false);
+        writeFloat(buf, playerPos.z);
+        print(buf, 80, 30, 5, false, 1, false);
+    }
 
     for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) {
         DeferredPOI dp = deferredPOIs[i];
@@ -263,6 +281,25 @@ void drawCockpit() {
             }
         }
     }
+}
+
+void drawFrontHud() {
+    uint8_t transparentColor = 0;
+
+    int const start = (WIDTH - 16*MENU_OPT_COUNT)/2;
+    if (btn(7)) {
+        for (int i = 0; i<MENU_OPT_COUNT; i++) {
+            spr(288+2*i, start + i*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
+            if (enabledMenuOpts & (1<<i)) spr(258, start + i*16 + 4 + 2*screenShake.x, 36 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 1, 1);
+        }
+        spr(256, start + menuOpt*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
+    }
+
+    pix(WIDTH/2, HEIGHT/2, 3);
+}
+
+void drawCockpit() {
+    uint8_t transparentColor = 0;
 
     tri(
         -10 + screenShake.x, 20     + screenShake.y, 
@@ -309,17 +346,6 @@ void drawCockpit() {
 
         1
     );
-
-    int const start = (WIDTH - 16*MENU_OPT_COUNT)/2;
-    if (btn(7)) {
-        for (int i = 0; i<MENU_OPT_COUNT; i++) {
-            spr(288+2*i, start + i*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
-            if (enabledMenuOpts & (1<<i)) spr(258, start + i*16 + 4 + 2*screenShake.x, 36 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 1, 1);
-        }
-        spr(256, start + menuOpt*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
-    }
-
-    pix(WIDTH/2, HEIGHT/2, 3);
 }
 
 uint64_t noiseMap[] = {
@@ -341,7 +367,7 @@ uint64_t noiseMap[] = {
     0x0001010012221100,
 };
 
-void drawPlanet(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform) {
+void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform) {
     circ(pos.x, pos.y, r, 13);
     if (r < 4) return;
     
@@ -463,6 +489,7 @@ typedef struct {
         PLANET,
     } type;
     Vec3 position;
+    char* tag;
     union {
         Star star;
         Planet planet;
@@ -489,16 +516,69 @@ void initBodyVisualInfo(BodyVisualInfo *self, Vec3 bodyPos, Vec3 playerPos, Mtx3
     self->screenspacePos = (Vec2){self->visPos.x*self->dz + FWIDTH/2, self->visPos.y*self->dz + FHEIGHT/2};
 }
 
+typedef struct {
+    Mtx33 rot;
+    Mtx33 invRot;
+    Vec3 forward;
+} PlayerVisualInfo;
+void initPlayerVisualInfo(PlayerVisualInfo* self) {
+    self->rot = playerRot;
+    self->invRot = invUnscaled(self->rot);
+    self->forward = mtx33MulVec(playerRot, (Vec3){0, 0, 1});
+}
+
+void drawOrbitLine(PlayerVisualInfo* pvi, OrbitLine* orbitLine) {
+    if (enabledMenuOpts & MENU_OPTION_ORRERY) {
+        Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], playerPos));
+        for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
+            Vec3 thisVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[i], playerPos));
+            if (thisVisPoint.z > 0 || lastVisPoint.z > 0) {
+                float ldz = HEIGHT/lastVisPoint.z;
+                if (ldz < 0) ldz *= -1000;
+                float tdz = HEIGHT/thisVisPoint.z;
+                if (tdz < 0) tdz *= -1000;
+                line(lastVisPoint.x * ldz + FWIDTH/2, lastVisPoint.y * ldz + FHEIGHT/2, thisVisPoint.x * tdz + FWIDTH/2, thisVisPoint.y * tdz + FHEIGHT/2, 3);
+            }
+            lastVisPoint = thisVisPoint;
+        }
+    }
+}
+
+void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
+    drawOrbitLine(pvi, planet->orbitLine);
+
+    if (bvi->visPos.z > 0) {
+        Vec3 visPole = v3Sub(mtx33MulVec(pvi->invRot, v3Add(bvi->relPos, (Vec3){0, 1, 0})), bvi->visPos);
+        Vec2 poleDir = v2Norm((Vec2){visPole.x, visPole.y});
+        drawPlanetSurface(bvi->screenspacePos, (FHEIGHT/2)*planet->radius*bvi->distInv, 
+            (Vec2){
+                -asinf(bvi->relPos.y*bvi->distInv)*8, 
+                acosf(bvi->relPos.x*bvi->distInv)*(bvi->relPos.z<0?1:-1)*INV_PI*8
+            },(Mtx22){
+                poleDir.x, poleDir.y,
+               -poleDir.y, poleDir.x,
+        });
+    }
+}
+
+void drawStar(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Star* star) {
+    if (bvi->visPos.z > 0) {
+        circ(bvi->screenspacePos.x, bvi->screenspacePos.y, (FHEIGHT/2)*star->radius*bvi->distInv, 8);
+    }
+}
+
 void draw() {
-    Mtx33 const invPlayerRot = invUnscaled(playerRot);
-    Vec3 const playerForward = mtx33MulVec(playerRot, (Vec3){0, 0, 1});
+    PlayerVisualInfo pvi = {0};
+    initPlayerVisualInfo(&pvi);
 
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
-        Vec3 vsPos = mtx33MulVec(invPlayerRot, skyboxStars[i]);
+        Vec3 vsPos = mtx33MulVec(pvi.invRot, skyboxStars[i]);
         if (vsPos.z <= 0) continue;
         float dz = HEIGHT / vsPos.z;
         pix(vsPos.x*dz + FWIDTH/2, vsPos.y*dz + FHEIGHT/2, 8);
     }
+
+    for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) deferredPOIs[i] = (DeferredPOI){0};
 
     {
         int nextDeferredPOIIndex = 0;
@@ -508,58 +588,22 @@ void draw() {
             if (body.type == INVALID) continue;
 
             BodyVisualInfo bvi;
-            initBodyVisualInfo(&bvi, body.position, playerPos, invPlayerRot);
+            initBodyVisualInfo(&bvi, body.position, playerPos, pvi.invRot);
+            if (bvi.visPos.z > 0) {
+                deferredPOIs[nextDeferredPOIIndex] = (DeferredPOI) {
+                    .show = true,
+                    .selected = true,
+                    .tag = body.tag,
+                    .screenPos = bvi.screenspacePos,
+                };
+                nextDeferredPOIIndex++;
+            }
 
             if (body.type == PLANET) {
-                if (enabledMenuOpts & MENU_OPTION_ORRERY) {
-                    Vec3 lastVisPoint = mtx33MulVec(invPlayerRot, v3Sub(body.info.planet.orbitLine->points[ORBIT_LINE_RESOLUTION-1], playerPos));
-                    for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
-                        Vec3 thisVisPoint = mtx33MulVec(invPlayerRot, v3Sub(body.info.planet.orbitLine->points[i], playerPos));
-                        if (thisVisPoint.z > 0 || lastVisPoint.z > 0) {
-                            float ldz = HEIGHT/lastVisPoint.z;
-                            if (ldz < 0) ldz *= -1000;
-                            float tdz = HEIGHT/thisVisPoint.z;
-                            if (tdz < 0) tdz *= -1000;
-                            line(lastVisPoint.x * ldz + FWIDTH/2, lastVisPoint.y * ldz + FHEIGHT/2, thisVisPoint.x * tdz + FWIDTH/2, thisVisPoint.y * tdz + FHEIGHT/2, 3);
-                        }
-                        lastVisPoint = thisVisPoint;
-                    }
-                }
-
-                if (bvi.visPos.z > 0) {
-                    Vec3 visPole = v3Sub(mtx33MulVec(invPlayerRot, v3Add(bvi.relPos, (Vec3){0, 1, 0})), bvi.visPos);
-                    Vec2 poleDir = v2Norm((Vec2){visPole.x, visPole.y});
-                    drawPlanet(bvi.screenspacePos, (FHEIGHT/2)*body.info.planet.radius*bvi.distInv, 
-                        (Vec2){
-                            -asinf(bvi.relPos.y*bvi.distInv)*8, 
-                            acosf(bvi.relPos.x*bvi.distInv)*(bvi.relPos.z<0?1:-1)*INV_PI*8
-                        },(Mtx22){
-                            poleDir.x, poleDir.y,
-                           -poleDir.y, poleDir.x,
-                    });
-
-                    deferredPOIs[nextDeferredPOIIndex] = (DeferredPOI) {
-                        .show = true,
-                        .selected = true,
-                        .tag = "Planet",
-                        .screenPos = bvi.screenspacePos,
-                    };
-                    nextDeferredPOIIndex++;
-                }
-
+                drawPlanet(&pvi, &bvi, &body.info.planet);
             }
             if (body.type == STAR) {
-                if (bvi.visPos.z > 0) {
-                    circ(bvi.screenspacePos.x, bvi.screenspacePos.y, (FHEIGHT/2)*body.info.star.radius*bvi.distInv, 8);
-
-                    deferredPOIs[nextDeferredPOIIndex] = (DeferredPOI) {
-                        .show = true,
-                        .selected = false,
-                        .tag = "Star",
-                        .screenPos = bvi.screenspacePos,
-                    };
-                    nextDeferredPOIIndex++;
-                }
+                drawStar(&pvi, &bvi, &body.info.star);
             }
         }
     }
@@ -585,6 +629,7 @@ void BOOT() {
     celestialBodies[0] = (CelestialBody){
         .type = STAR,
         .position = {0, 0, 0},
+        .tag = "STAR",
         .info = {.star = (Star){
             .radius = 10,
         }},
@@ -594,6 +639,7 @@ void BOOT() {
     celestialBodies[1] = (CelestialBody){
         .type = PLANET,
         .position = {40, 0, 0},
+        .tag = "PLANET",
         .info = {.planet = (Planet){
             .radius = 0.4,
             .orbitLine = &orbitLines[nextOrbitLineIndex],
@@ -604,9 +650,7 @@ void BOOT() {
 
 WASM_EXPORT("TIC")
 void TIC() {
-    for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) deferredPOIs[i].show = false;
     screenShake = v2Scale(screenShake, 0.5);
-    cls(0);
 
     if (!btn(7)) {
         if (btn(0)) {playerRot = mtx33Mul(playerRot, rotX(-0.01)); screenShake.y -= 3;}
@@ -645,21 +689,11 @@ void TIC() {
 
     playerPos = v3Add(playerPos, v3Scale(playerForward, playerSpeed*SECONDS_PER_FRAME));
 
+    cls(0);
     draw();
-
-    char buf[64] = {0};
-
-    writeFloat(buf, playerSpeed);
-    print(buf, 120, 10, 5, false, 1, false);
-
-    writeFloat(buf, playerPos.x);
-    print(buf, 80, 10, 5, false, 1, false);
-    writeFloat(buf, playerPos.y);
-    print(buf, 80, 20, 5, false, 1, false);
-    writeFloat(buf, playerPos.z);
-    print(buf, 80, 30, 5, false, 1, false);
-
+    drawBackHud();
     drawCockpit();
+    drawFrontHud();
 
     frame++;
     lastButtonInputs = GAMEPADS[0];
