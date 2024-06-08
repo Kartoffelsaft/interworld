@@ -47,6 +47,15 @@ Vec2 v2Add(Vec2 lhs, Vec2 rhs) {
 Vec2 v2Scale(Vec2 v, float amount) {
     return (Vec2){v.x * amount, v.y * amount};
 }
+float v2LenSqr(Vec2 v) {
+    return v.x*v.x + v.y*v.y;
+}
+float v2Len(Vec2 v) {
+    return sqrtf(v2LenSqr(v));
+}
+Vec2 v2Norm(Vec2 v) {
+    return v2Scale(v, 1/v2Len(v));
+}
 Vec3 v3Sub(Vec3 lhs, Vec3 rhs) {
     return (Vec3){
         lhs.x - rhs.x,
@@ -71,6 +80,15 @@ Vec3 v3Cross(Vec3 lhs, Vec3 rhs) {
         lhs.x * rhs.y,
     };
 }
+float v3LenSqr(Vec3 v) {
+    return v.x*v.x + v.y*v.y + v.z*v.z;
+}
+float v3Len(Vec3 v) {
+    return sqrtf(v3LenSqr(v));
+}
+Vec3 v3Norm(Vec3 v) {
+    return v3Scale(v, 1/v3Len(v));
+}
 
 Vec3 mtx33MulVec(Mtx33 mtx, Vec3 v) {
     return (Vec3){
@@ -92,6 +110,17 @@ Mtx33 invUnscaled(Mtx33 mtx) {
         mtx.bb*mtx.cc - mtx.bc*mtx.cb, mtx.ac*mtx.cb - mtx.ab*mtx.cc, mtx.ab*mtx.bc - mtx.ac*mtx.bb,
         mtx.bc*mtx.ca - mtx.ba*mtx.cc, mtx.aa*mtx.cc - mtx.ac*mtx.ca, mtx.ac*mtx.ba - mtx.aa*mtx.bc,
         mtx.ba*mtx.cb - mtx.bb*mtx.ca, mtx.ab*mtx.ca - mtx.aa*mtx.cb, mtx.aa*mtx.bb - mtx.ba*mtx.ab,
+    };
+}
+
+Mtx33 mtx33LookAt(Vec3 v) {
+    Vec3 zax = v3Norm(v);
+    Vec3 xax = v3Norm(v3Cross(v, (Vec3){0, 1, 0}));
+    Vec3 yax = v3Cross(zax, xax);
+    return (Mtx33){
+        xax.x, yax.x, zax.x,
+        xax.y, yax.y, zax.y,
+        xax.z, yax.z, zax.z,
     };
 }
 
@@ -135,25 +164,6 @@ Mtx33 rotZ(float theta) {
         0, 1, 0,\
         0, 0, 1,\
     }
-
-float v2LenSqr(Vec2 v) {
-    return v.x*v.x + v.y*v.y;
-}
-float v2Len(Vec2 v) {
-    return sqrtf(v2LenSqr(v));
-}
-Vec2 v2Norm(Vec2 v) {
-    return v2Scale(v, 1/v2Len(v));
-}
-float v3LenSqr(Vec3 v) {
-    return v.x*v.x + v.y*v.y + v.z*v.z;
-}
-float v3Len(Vec3 v) {
-    return sqrtf(v3LenSqr(v));
-}
-Vec3 v3Norm(Vec3 v) {
-    return v3Scale(v, 1/v3Len(v));
-}
 
 /// https://stackoverflow.com/questions/3380628/fast-arc-cos-algorithm/26030435#26030435
 float acosf(float x) {
@@ -367,10 +377,17 @@ uint64_t noiseMap[] = {
     0x0001010012221100,
 };
 
-void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform) {
-    circ(pos.x, pos.y, r, 13);
-    if (r < 4) return;
-    
+void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Vec3 lightDir) {
+    if (r < 4) {
+        circ(pos.x, pos.y, r, 13);
+        return;
+    }
+
+    circ(pos.x, pos.y, r, 5);
+
+    Vec2 lightNorm = v2Norm((Vec2){.x = lightDir.x, lightDir.y});
+    float lightSlope = -lightNorm.x / lightNorm.y;
+
     float invR = 1/r;
     for (float j = -r; j < +r; j+=1)
     for (float i = -sqrtf(r*r-j*j)+0.5; i < +r; i+=2) {
@@ -397,7 +414,7 @@ void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform) {
         // FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] = (sx<<4) | sy;
 
         if ((pix)>0) {
-            FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] = 0xee;
+            FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] = 0x66;
         }
 
         tx = (int)((ftex.x+texOffset.x)*4+65536)%(sizeof(uint64_t)*8/BPP);
@@ -406,7 +423,21 @@ void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform) {
         pix = (noiseMap[ty] >> (tx*4)) & 0xf;
 
         if ((pix)>1) {
-            FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] = 0xcc;
+            FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] = 0x44;
+        }
+
+        float xp = (lightNorm.x * i + lightNorm.y * j) * invR;
+        float yp = (lightNorm.y * i - lightNorm.x * j) * invR;
+        bool betweenTerminators = xp*xp + lightDir.z*lightDir.z*yp*yp < lightDir.z*lightDir.z;
+        bool onLitSide = (j - i*lightSlope)*lightNorm.y > 0;
+        if (lightDir.z > 0) {
+            if (onLitSide && !betweenTerminators) {
+                FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] |= 0x88;
+            }
+        } else {
+            if (onLitSide || betweenTerminators) {
+                FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] |= 0x88;
+            }
         }
     }
 
@@ -500,6 +531,7 @@ typedef struct {
 CelestialBody celestialBodies[MAX_SYSTEM_OBJECT_COUNT] = {0};
 
 typedef struct {
+    Vec3 realPos;
     Vec3 relPos;
     Vec3 visPos;
     float dist;
@@ -508,6 +540,7 @@ typedef struct {
     Vec2 screenspacePos;
 } BodyVisualInfo;
 void initBodyVisualInfo(BodyVisualInfo *self, Vec3 bodyPos, Vec3 playerPos, Mtx33 invPlayerRot){
+    self->realPos = bodyPos;
     self->relPos = v3Sub(bodyPos, playerPos);
     self->visPos = mtx33MulVec(invPlayerRot, self->relPos);
     self->dist = v3Len(self->relPos);
@@ -550,6 +583,10 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
     if (bvi->visPos.z > 0) {
         Vec3 visPole = v3Sub(mtx33MulVec(pvi->invRot, v3Add(bvi->relPos, (Vec3){0, 1, 0})), bvi->visPos);
         Vec2 poleDir = v2Norm((Vec2){visPole.x, visPole.y});
+        //Vec3 visLightPos = mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, playerPos));
+        //Vec3 lightDir = mtx33MulVec(mtx33LookAt(v3Sub(visLightPos, bvi->visPos)), (Vec3){0, 0, 1});
+        //Vec3 lightDir = (Vec3){0.707, 0.001, -0.707};
+        Vec3 lightDir = v3Norm(mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, bvi->realPos)));
         drawPlanetSurface(bvi->screenspacePos, (FHEIGHT/2)*planet->radius*bvi->distInv, 
             (Vec2){
                 -asinf(bvi->relPos.y*bvi->distInv)*8, 
@@ -557,7 +594,9 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
             },(Mtx22){
                 poleDir.x, poleDir.y,
                -poleDir.y, poleDir.x,
-        });
+            },
+            lightDir
+        );
     }
 }
 
@@ -638,7 +677,7 @@ void BOOT() {
     orbitLines[nextOrbitLineIndex] = generateOrbitLine(40);
     celestialBodies[1] = (CelestialBody){
         .type = PLANET,
-        .position = {40, 0, 0},
+        .position = {0, 0, -40},
         .tag = "PLANET",
         .info = {.planet = (Planet){
             .radius = 0.4,
