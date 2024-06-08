@@ -9,6 +9,7 @@
 #endif
 #endif
 #include <math.h>
+#include <stddef.h>
 
 #define SECONDS_PER_FRAME (1.0/60)
 uint8_t lastButtonInputs = 0; // btnp doesn't seem to be working right
@@ -18,6 +19,154 @@ uint8_t lastButtonInputs = 0; // btnp doesn't seem to be working right
 
 #define FWIDTH ((float)WIDTH)
 #define FHEIGHT ((float)HEIGHT)
+
+typedef enum {
+    ALLOC,
+    FREE,
+    REALLOC,
+    EMPTY,
+} MemOperator;
+typedef void (*MemFn)(void* info, MemOperator operation, void** ptr, size_t oldSize, size_t newSize);
+typedef struct {
+    MemFn operate;
+    void* info;
+} Allocator;
+
+void* aalloc(Allocator a, size_t amount) {
+    void* ret = NULL;
+    a.operate(a.info, ALLOC, &ret, 0, amount);
+    return ret;
+}
+void afree(Allocator a, void* what, size_t amount) {
+    a.operate(a.info, FREE, &what, amount, 0);
+}
+void arealloc(Allocator a, void** what, size_t oldSize, size_t newSize) {
+    a.operate(a.info, REALLOC, what, oldSize, newSize);
+}
+void aempty(Allocator a) {
+    a.operate(a.info, EMPTY, NULL, 0, 0);
+}
+
+void* memcpy(void* restrict dest, void const * restrict src, size_t n) {
+    for (int i = 0; i < n; i++) *(uint8_t*)(dest++) = *(uint8_t*)(src++);
+    return dest-n;
+}
+size_t strlen(char const * s) {
+    size_t n;
+    while(*(s++)) n++;
+    return n;
+}
+
+struct PairTickAllocInfo_s;
+struct PairPersistAllocInfo_s;
+typedef struct PairTickAllocInfo_s {
+    void* head;
+    void* start;
+    struct PairPersistAllocInfo_s* other;
+} PairTickAllocInfo;
+typedef struct PairPersistAllocInfo_s {
+    void* head;
+    void* start;
+    struct PairTickAllocInfo_s* other;
+} PairPersistAllocInfo;
+
+void pairTickAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
+    PairTickAllocInfo* a = info;
+    size_t osAligned = ((oldSize-1)/8 + 1)*8;
+    size_t nsAligned = ((newSize-1)/8 + 1)*8;
+
+    switch (op) {
+        case ALLOC:
+            if (a->head + nsAligned > a->other->head) {
+                *ptr = NULL;
+            } else {
+                *ptr = a->head;
+                a->head += nsAligned;
+            }
+            break;
+        case FREE:
+            a->head = *ptr;
+            break;
+        case REALLOC:
+            if (*ptr + osAligned == a->head) {
+                // TODO: doesn't check if there's enough space but I am lazy right now
+                a->head = *ptr + nsAligned;
+            } else {
+                trace("WARNING: tick allocator can only realloc last alloc", 1);
+            }
+            break;
+        case EMPTY:
+            a->head = a->start;
+    }
+}
+
+void pairPersistAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
+    PairTickAllocInfo* a = info;
+    size_t osAligned = ((oldSize-1)/8 + 1)*8;
+    size_t nsAligned = ((newSize-1)/8 + 1)*8;
+
+    switch (op) {
+        case ALLOC:
+            if (a->head - nsAligned < a->other->head) {
+                *ptr = NULL;
+            } else {
+                a->head -= nsAligned;
+                *ptr = a->head;
+            }
+            break;
+        case FREE:
+            // TODO: need some info on the mem size to properly do this
+            break;
+        case REALLOC:
+            trace("WARNING: persist allocator doesn't implement realloc", 1);
+            break;
+        case EMPTY:
+            a->head = a->start;
+    }
+}
+
+void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
+    void* startOfUsableMemory = WASM_FREE_RAM;
+
+    tickAllocator->info = startOfUsableMemory; startOfUsableMemory += sizeof(PairTickAllocInfo);
+    *(PairTickAllocInfo*)tickAllocator->info = (PairTickAllocInfo){0};
+    tickAllocator->operate = &pairTickAllocOp;
+
+    persistAllocator->info = startOfUsableMemory; startOfUsableMemory += sizeof(PairPersistAllocInfo);
+    *(PairPersistAllocInfo*)persistAllocator->info = (PairPersistAllocInfo){0};
+    persistAllocator->operate = &pairPersistAllocOp;
+
+    ((PairTickAllocInfo*)tickAllocator->info)->head = startOfUsableMemory;
+    ((PairTickAllocInfo*)tickAllocator->info)->start = startOfUsableMemory;
+    ((PairTickAllocInfo*)tickAllocator->info)->other = persistAllocator->info;
+
+    ((PairPersistAllocInfo*)persistAllocator->info)->head = WASM_FREE_RAM+WASM_FREE_RAM_SIZE;
+    ((PairPersistAllocInfo*)persistAllocator->info)->start = WASM_FREE_RAM+WASM_FREE_RAM_SIZE;
+    ((PairPersistAllocInfo*)persistAllocator->info)->other = tickAllocator->info;
+}
+
+Allocator tickAllocator;
+Allocator persistAllocator;
+
+size_t freeMemory() {
+    return ((PairPersistAllocInfo*)persistAllocator.info)->head - ((PairTickAllocInfo*)tickAllocator.info)->head;
+}
+
+void persistify(void** oldPtr, size_t size) {
+    void* newPtr = aalloc(persistAllocator, size);
+    memcpy(newPtr, *oldPtr, size);
+    afree(tickAllocator, *oldPtr, size);
+    *oldPtr = newPtr;
+}
+
+uint32_t rand(uint64_t iseed) {
+    static uint64_t seed = 915780157;
+    if (iseed != 0) {
+        seed = iseed;
+    }
+    seed = (seed * 22695477 + 1);
+    return seed >> 2;
+}
 
 typedef struct {
     float x, y;
@@ -235,6 +384,26 @@ int writeFloat(char* buf, float x) {
     return rest-buf;
 }
 
+char* generateName() {
+    char* output = aalloc(tickAllocator, 1);
+    char* consonants = "QWRTYPSDFGHJKLZXCVBNM";
+    size_t consonant_n = strlen(consonants);
+    char* vowels = "AEIOUY";
+    size_t vowel_n = strlen(vowels);
+
+    for (int i = 0; i < 4; i++) {
+        size_t consonants_i = rand(0) % consonant_n;
+        size_t vowel_i = rand(0) % vowel_n;
+        arealloc(tickAllocator, (void**)&output, i*2+1, i*2+3);
+        output[i*2+0] = consonants[consonants_i];
+        output[i*2+1] = vowels[vowel_i];
+        output[i*2+2] = 0;
+    }
+
+    persistify((void**)&output, strlen(output)+1);
+    return output;
+}
+
 Mtx33 playerRot = MATRIX33_IDENTITY;
 Vec3 playerPos = {0, 0, -50};
 float playerSpeed = 0;
@@ -263,7 +432,7 @@ void drawBackHud() {
     uint8_t transparentColor = 0;
 
     if (enabledMenuOpts & MENU_OPTION_DEBUG) {
-        char buf[64] = {0};
+        char* buf = aalloc(tickAllocator, 64);
 
         writeFloat(buf, playerSpeed);
         print(buf, 120, 10, 5, false, 1, false);
@@ -274,6 +443,11 @@ void drawBackHud() {
         print(buf, 80, 20, 5, false, 1, false);
         writeFloat(buf, playerPos.z);
         print(buf, 80, 30, 5, false, 1, false);
+
+        writeInt(buf, freeMemory());
+        print(buf, 0, 0, 5, false, 1, false);
+        writeFloat(buf, 100.0 * freeMemory() / WASM_FREE_RAM_SIZE);
+        print(buf, 0, 10, 5, false, 1, false);
     }
 
     for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) {
@@ -650,6 +824,8 @@ void draw() {
 
 WASM_EXPORT("BOOT")
 void BOOT() {
+    initAllocators(&tickAllocator, &persistAllocator);
+
     char traceBuf[32];
     uint32_t rand_data = 2985085101;
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
@@ -678,7 +854,7 @@ void BOOT() {
     celestialBodies[1] = (CelestialBody){
         .type = PLANET,
         .position = {0, 0, -40},
-        .tag = "PLANET",
+        .tag = generateName(),
         .info = {.planet = (Planet){
             .radius = 0.4,
             .orbitLine = &orbitLines[nextOrbitLineIndex],
@@ -736,6 +912,7 @@ void TIC() {
 
     frame++;
     lastButtonInputs = GAMEPADS[0];
+    aempty(tickAllocator);
 }
 
 WASM_EXPORT("BDR")
