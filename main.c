@@ -20,6 +20,13 @@ uint8_t lastButtonInputs = 0; // btnp doesn't seem to be working right
 #define FWIDTH ((float)WIDTH)
 #define FHEIGHT ((float)HEIGHT)
 
+int writeInt(char* buf, int n);
+void traceNum(int n) {
+    char buf[32] = {0};
+    writeInt(buf, n);
+    trace(buf, 1);
+}
+
 typedef enum {
     ALLOC,
     FREE,
@@ -52,7 +59,7 @@ void* memcpy(void* restrict dest, void const * restrict src, size_t n) {
     return dest-n;
 }
 size_t strlen(char const * s) {
-    size_t n;
+    size_t n = 0;
     while(*(s++)) n++;
     return n;
 }
@@ -97,6 +104,7 @@ void pairTickAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, siz
             break;
         case EMPTY:
             a->head = a->start;
+            break;
     }
 }
 
@@ -126,7 +134,9 @@ void pairPersistAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, 
 }
 
 void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
-    void* startOfUsableMemory = WASM_FREE_RAM;
+    // add some amount to avoid .rodata and .data sections
+    // TODO: somehow figure that out automatically
+    void* startOfUsableMemory = WASM_FREE_RAM + 0x1000;
 
     tickAllocator->info = startOfUsableMemory; startOfUsableMemory += sizeof(PairTickAllocInfo);
     *(PairTickAllocInfo*)tickAllocator->info = (PairTickAllocInfo){0};
@@ -159,7 +169,7 @@ void persistify(void** oldPtr, size_t size) {
     *oldPtr = newPtr;
 }
 
-uint32_t rand(uint64_t iseed) {
+uint32_t rands(uint64_t iseed) {
     static uint64_t seed = 915780157;
     if (iseed != 0) {
         seed = iseed;
@@ -308,6 +318,36 @@ Mtx33 rotZ(float theta) {
     };
 }
 
+float sinfa(float);
+float cosfa(float);
+Mtx33 rotXA(float theta) {
+    float s = sinfa(theta);
+    float c = cosfa(theta);
+    return (Mtx33) {
+        1, 0, 0,
+        0, c,-s,
+        0, s, c,
+    };
+}
+Mtx33 rotYA(float theta) {
+    float s = sinfa(theta);
+    float c = cosfa(theta);
+    return (Mtx33) {
+        c, 0, s,
+        0, 1, 0,
+       -s, 0, c,
+    };
+}
+Mtx33 rotZA(float theta) {
+    float s = sinfa(theta);
+    float c = cosfa(theta);
+    return (Mtx33) {
+        c,-s, 0,
+        s, c, 0,
+        0, 0, 1,
+    };
+}
+
 #define MATRIX33_IDENTITY (Mtx33){\
         1, 0, 0,\
         0, 1, 0,\
@@ -320,6 +360,16 @@ float acosf(float x) {
 }
 float asinf(float x) {
     return PI - acosf(x);
+}
+
+float sinfa(float x) {
+    x *= 1/(2*PI);
+    x -= (int)x;
+    if (x < 0.5) return -8 * x * (2*x - 1);
+    else return 8 * x * (2*x - 3) + 8;
+}
+float cosfa(float x) {
+    return sinfa(x + PI/2);
 }
 
 int writeInt(char* buf, int x) {
@@ -386,14 +436,15 @@ int writeFloat(char* buf, float x) {
 
 char* generateName() {
     char* output = aalloc(tickAllocator, 1);
+    if (output == NULL) return NULL;
     char* consonants = "QWRTYPSDFGHJKLZXCVBNM";
     size_t consonant_n = strlen(consonants);
     char* vowels = "AEIOUY";
     size_t vowel_n = strlen(vowels);
 
     for (int i = 0; i < 4; i++) {
-        size_t consonants_i = rand(0) % consonant_n;
-        size_t vowel_i = rand(0) % vowel_n;
+        size_t consonants_i = rands(0) % consonant_n;
+        size_t vowel_i = rands(0) % vowel_n;
         arealloc(tickAllocator, (void**)&output, i*2+1, i*2+3);
         output[i*2+0] = consonants[consonants_i];
         output[i*2+1] = vowels[vowel_i];
@@ -664,16 +715,18 @@ Vec3 skyboxStars[SKYBOX_STAR_COUNT];
 typedef struct{
     Vec3 points[ORBIT_LINE_RESOLUTION];
 } OrbitLine;
-#define MAX_ORBIT_LINES 4
-OrbitLine orbitLines[MAX_ORBIT_LINES] = {0};
 
-OrbitLine generateOrbitLine(float r) {
-    OrbitLine ret = {0};
-    Mtx33 nextPointMtx = rotZ(PI / ORBIT_LINE_RESOLUTION * 2);
+OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
+    OrbitLine* ret = aalloc(persistAllocator, sizeof(OrbitLine));
+    Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
 
-    ret.points[0] = (Vec3){r, 0, 0};
+    ret->points[0] = v3Sub(position, parent);
     for (int i = 1; i < ORBIT_LINE_RESOLUTION; i++) {
-        ret.points[i] = mtx33MulVec(nextPointMtx, ret.points[i-1]);
+        ret->points[i] = mtx33MulVec(nextPointMtx, ret->points[i-1]);
+    }
+
+    for (int i = 0; i < ORBIT_LINE_RESOLUTION; i++) {
+        ret->points[i] = v3Add(ret->points[i], parent);
     }
 
     return ret;
@@ -685,6 +738,9 @@ typedef struct {
 typedef struct {
     float radius;
     OrbitLine* orbitLine;
+    uint8_t colorLand[3];
+    uint8_t colorSea[3];
+    uint8_t colorClouds[3];
 } Planet;
 
 typedef struct {
@@ -703,6 +759,37 @@ typedef struct {
 
 #define MAX_SYSTEM_OBJECT_COUNT 4
 CelestialBody celestialBodies[MAX_SYSTEM_OBJECT_COUNT] = {0};
+
+CelestialBody generatePlanet() {
+    enum {
+        TERRESTRIAL,
+        PLANET_VARIETY,
+    } kind = rands(0) % PLANET_VARIETY;
+
+    CelestialBody planet = {0};
+    planet.position = mtx33MulVec(rotYA((float)(rands(0)%4096)), (Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
+    planet.tag = generateName();
+    planet.type = PLANET;
+    planet.info.planet.orbitLine = generateOrbitLine((Vec3){0, 0, 0}, planet.position);
+
+    switch (kind) {
+        case TERRESTRIAL:
+            planet.info.planet.radius = ((rands(0)%128 + 64) / 196.0);
+            planet.info.planet.colorLand  [0] = 0x4C;
+            planet.info.planet.colorLand  [1] = 0x81;
+            planet.info.planet.colorLand  [2] = 0x28;
+            planet.info.planet.colorSea   [0] = 0x79;
+            planet.info.planet.colorSea   [1] = 0x9D;
+            planet.info.planet.colorSea   [2] = 0xFF;
+            planet.info.planet.colorClouds[0] = 0xF4;
+            planet.info.planet.colorClouds[1] = 0xF4;
+            planet.info.planet.colorClouds[2] = 0xF4;
+            break;
+        case PLANET_VARIETY: break;
+    }
+
+    return planet;
+}
 
 typedef struct {
     Vec3 realPos;
@@ -826,15 +913,10 @@ WASM_EXPORT("BOOT")
 void BOOT() {
     initAllocators(&tickAllocator, &persistAllocator);
 
-    char traceBuf[32];
-    uint32_t rand_data = 2985085101;
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
-        rand_data = (rand_data * 22695477 + 1);
-        float x = (float)rand_data * ((rand_data&8)?-1:1);
-        rand_data = (rand_data * 22695477 + 1);
-        float y = (float)rand_data * ((rand_data&4)?-1:1);
-        rand_data = (rand_data * 22695477 + 1);
-        float z = (float)rand_data * ((rand_data&32)?-1:1);
+        float x = (float)rands(0) * ((rands(0)& 8)?-1:1);
+        float y = (float)rands(0) * ((rands(0)& 4)?-1:1);
+        float z = (float)rands(0) * ((rands(0)&32)?-1:1);
 
         skyboxStars[i] = (Vec3){x, y, z};
     }
@@ -850,17 +932,9 @@ void BOOT() {
         }},
     };
 
-    orbitLines[nextOrbitLineIndex] = generateOrbitLine(40);
-    celestialBodies[1] = (CelestialBody){
-        .type = PLANET,
-        .position = {0, 0, -40},
-        .tag = generateName(),
-        .info = {.planet = (Planet){
-            .radius = 0.4,
-            .orbitLine = &orbitLines[nextOrbitLineIndex],
-        }},
-    };
-    nextOrbitLineIndex++;
+    celestialBodies[1] = generatePlanet();
+    celestialBodies[2] = generatePlanet();
+    celestialBodies[3] = generatePlanet();
 }
 
 WASM_EXPORT("TIC")
@@ -942,5 +1016,34 @@ int main() {
     Mtx33 invMul = invUnscaled(mul);
     printf("invMul:\n");
     printMtx(invMul);
+
+    uint8_t data[0x10000];
+    void* startOfUsableMemory = data;
+
+    tickAllocator.info = startOfUsableMemory; startOfUsableMemory += sizeof(PairTickAllocInfo);
+    *(PairTickAllocInfo*)tickAllocator.info = (PairTickAllocInfo){0};
+    tickAllocator.operate = &pairTickAllocOp;
+
+    persistAllocator.info = startOfUsableMemory; startOfUsableMemory += sizeof(PairPersistAllocInfo);
+    *(PairPersistAllocInfo*)persistAllocator.info = (PairPersistAllocInfo){0};
+    persistAllocator.operate = &pairPersistAllocOp;
+
+    ((PairTickAllocInfo*)tickAllocator.info)->head = startOfUsableMemory;
+    ((PairTickAllocInfo*)tickAllocator.info)->start = startOfUsableMemory;
+    ((PairTickAllocInfo*)tickAllocator.info)->other = persistAllocator.info;
+
+    ((PairPersistAllocInfo*)persistAllocator.info)->head = data+0x10000;
+    ((PairPersistAllocInfo*)persistAllocator.info)->start = data+0x10000;
+    ((PairPersistAllocInfo*)persistAllocator.info)->other = tickAllocator.info;
+
+    printf("%s\n", generateName());
+    printf("%s\n", generateName());
+    printf("%s\n", generateName());
+
+    for (float i = 0; i < 2*PI; i += 0.1) {
+        printf("sin(%6.6f)=%6.6f\n", i, sinfa(i));
+    }
+
+    CelestialBody cb = generatePlanet();
 }
 #endif
