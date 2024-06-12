@@ -657,10 +657,117 @@ uint64_t noiseMap[] = {
     0x0001010012221100,
 };
 
-void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Vec3 lightDir) {
+uint64_t frame = 0;
+
+#define SKYBOX_STAR_COUNT 64
+Vec3 skyboxStars[SKYBOX_STAR_COUNT];
+
+#define ORBIT_LINE_RESOLUTION 20
+typedef struct{
+    Vec3 points[ORBIT_LINE_RESOLUTION];
+} OrbitLine;
+
+OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
+    OrbitLine* ret = aalloc(currentSystemAllocator, sizeof(OrbitLine));
+    Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
+
+    ret->points[0] = v3Sub(position, parent);
+    for (int i = 1; i < ORBIT_LINE_RESOLUTION; i++) {
+        ret->points[i] = mtx33MulVec(nextPointMtx, ret->points[i-1]);
+    }
+
+    for (int i = 0; i < ORBIT_LINE_RESOLUTION; i++) {
+        ret->points[i] = v3Add(ret->points[i], parent);
+    }
+
+    return ret;
+}
+
+typedef struct {
+    float radius;
+} Star;
+typedef struct {
+    float radius;
+    OrbitLine* orbitLine;
+    uint8_t colorClouds[3];
+    uint8_t colorSea[3];
+    uint8_t colorLand[3];
+} Planet;
+
+typedef struct {
+    enum {
+        INVALID = 0,
+        STAR,
+        PLANET,
+    } type;
+    Vec3 position;
+    char* tag;
+    union {
+        Star star;
+        Planet planet;
+    } info;
+} CelestialBody;
+
+#define MAX_SYSTEM_OBJECT_COUNT 4
+CelestialBody celestialBodies[MAX_SYSTEM_OBJECT_COUNT] = {0};
+
+CelestialBody generatePlanet() {
+    enum {
+        TERRESTRIAL,
+        PLANET_VARIETY,
+    } kind = rands(0) % PLANET_VARIETY;
+
+    CelestialBody planet = {0};
+    planet.position = mtx33MulVec(rotYA((float)(rands(0)%4096)), (Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
+    planet.tag = generateName(currentSystemAllocator);
+    planet.type = PLANET;
+    planet.info.planet.orbitLine = generateOrbitLine((Vec3){0, 0, 0}, planet.position);
+
+    uint32_t colorVarier[2] = {~(rands(0)|rands(0)), ~(rands(0)|rands(0))};
+    colorVarier[0] &= 0x3f3f3f3f;
+    colorVarier[1] &= 0x3f3f3f3f;
+
+    switch (kind) {
+        case TERRESTRIAL:
+            planet.info.planet.radius = ((rands(0)%128 + 64) / 196.0);
+            planet.info.planet.colorClouds[0] = 0xF4;
+            planet.info.planet.colorClouds[1] = 0xF4;
+            planet.info.planet.colorClouds[2] = 0xF4;
+            planet.info.planet.colorSea   [0] = 0x79;
+            planet.info.planet.colorSea   [1] = 0x9D;
+            planet.info.planet.colorSea   [2] = 0xFF;
+            planet.info.planet.colorLand  [0] = 0x4C;
+            planet.info.planet.colorLand  [1] = 0x81;
+            planet.info.planet.colorLand  [2] = 0x28;
+            break;
+        case PLANET_VARIETY: break;
+    }
+
+    for (int i = 0; i < 8; i++) {
+        planet.info.planet.colorSea[i] ^= ((uint8_t*)(&colorVarier[0]))[i];
+    }
+
+    return planet;
+}
+
+void setPlanetPalette(Planet* planet) {
+    int const CLOUD_SHADE = 0x4;
+    int const WATER_SHADE = 0x5;
+    int const LAND_SHADE  = 0x6;
+    int const CLOUD_LIT   = 0x8 | CLOUD_SHADE;
+    int const WATER_LIT   = 0x8 | WATER_SHADE;
+    int const LAND_LIT    = 0x8 | LAND_SHADE ;
+
+    memcpy(&FRAMEBUFFER->PALETTE[CLOUD_LIT*3], &planet->colorClouds[0], 9);
+    for (int i = 0; i < 9; i++) {
+        FRAMEBUFFER->PALETTE[CLOUD_SHADE*3+i] = planet->colorClouds[i] / 6;
+    }
+}
+
+bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Vec3 lightDir) {
     if (r < 4) {
         circ(pos.x, pos.y, r, 13);
-        return;
+        return false;
     }
 
     circ(pos.x, pos.y, r, 5);
@@ -679,7 +786,7 @@ void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
         if (si < 0) {i = -pos.x; continue;}
         if (si >= WIDTH) break;
         if (sj < 0) {j = -pos.y; continue;}
-        if (sj >= HEIGHT) return;
+        if (sj >= HEIGHT) return true;
 
         Vec2 ftex = mtx22MulVec(texTransform, (Vec2){
             (thisr2*i+i)*invR*invR*invR*8,
@@ -721,6 +828,8 @@ void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
         }
     }
 
+    return true;
+
     // Looks like TIC-80 doesn't support simd :(
     // Not like I should have expected it to though
     //int16_t iposx = pos.x;
@@ -759,91 +868,6 @@ void drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
     //        FRAMEBUFFER->SCREEN[(j*WIDTH + i + d)/2] |= (c&0xf) << (c&1);
     //    }
     //}
-}
-
-uint64_t frame = 0;
-
-#define SKYBOX_STAR_COUNT 64
-Vec3 skyboxStars[SKYBOX_STAR_COUNT];
-
-#define ORBIT_LINE_RESOLUTION 20
-typedef struct{
-    Vec3 points[ORBIT_LINE_RESOLUTION];
-} OrbitLine;
-
-OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
-    OrbitLine* ret = aalloc(currentSystemAllocator, sizeof(OrbitLine));
-    Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
-
-    ret->points[0] = v3Sub(position, parent);
-    for (int i = 1; i < ORBIT_LINE_RESOLUTION; i++) {
-        ret->points[i] = mtx33MulVec(nextPointMtx, ret->points[i-1]);
-    }
-
-    for (int i = 0; i < ORBIT_LINE_RESOLUTION; i++) {
-        ret->points[i] = v3Add(ret->points[i], parent);
-    }
-
-    return ret;
-}
-
-typedef struct {
-    float radius;
-} Star;
-typedef struct {
-    float radius;
-    OrbitLine* orbitLine;
-    uint8_t colorLand[3];
-    uint8_t colorSea[3];
-    uint8_t colorClouds[3];
-} Planet;
-
-typedef struct {
-    enum {
-        INVALID = 0,
-        STAR,
-        PLANET,
-    } type;
-    Vec3 position;
-    char* tag;
-    union {
-        Star star;
-        Planet planet;
-    } info;
-} CelestialBody;
-
-#define MAX_SYSTEM_OBJECT_COUNT 4
-CelestialBody celestialBodies[MAX_SYSTEM_OBJECT_COUNT] = {0};
-
-CelestialBody generatePlanet() {
-    enum {
-        TERRESTRIAL,
-        PLANET_VARIETY,
-    } kind = rands(0) % PLANET_VARIETY;
-
-    CelestialBody planet = {0};
-    planet.position = mtx33MulVec(rotYA((float)(rands(0)%4096)), (Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
-    planet.tag = generateName(currentSystemAllocator);
-    planet.type = PLANET;
-    planet.info.planet.orbitLine = generateOrbitLine((Vec3){0, 0, 0}, planet.position);
-
-    switch (kind) {
-        case TERRESTRIAL:
-            planet.info.planet.radius = ((rands(0)%128 + 64) / 196.0);
-            planet.info.planet.colorLand  [0] = 0x4C;
-            planet.info.planet.colorLand  [1] = 0x81;
-            planet.info.planet.colorLand  [2] = 0x28;
-            planet.info.planet.colorSea   [0] = 0x79;
-            planet.info.planet.colorSea   [1] = 0x9D;
-            planet.info.planet.colorSea   [2] = 0xFF;
-            planet.info.planet.colorClouds[0] = 0xF4;
-            planet.info.planet.colorClouds[1] = 0xF4;
-            planet.info.planet.colorClouds[2] = 0xF4;
-            break;
-        case PLANET_VARIETY: break;
-    }
-
-    return planet;
 }
 
 typedef struct {
@@ -903,7 +927,7 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
         //Vec3 lightDir = mtx33MulVec(mtx33LookAt(v3Sub(visLightPos, bvi->visPos)), (Vec3){0, 0, 1});
         //Vec3 lightDir = (Vec3){0.707, 0.001, -0.707};
         Vec3 lightDir = v3Norm(mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, bvi->realPos)));
-        drawPlanetSurface(bvi->screenspacePos, (FHEIGHT/2)*planet->radius*bvi->distInv, 
+        bool highLOD = drawPlanetSurface(bvi->screenspacePos, (FHEIGHT/2)*planet->radius*bvi->distInv, 
             (Vec2){
                 -asinf(bvi->relPos.y*bvi->distInv)*8, 
                 acosf(bvi->relPos.x*bvi->distInv)*(bvi->relPos.z<0?1:-1)*INV_PI*8
@@ -913,6 +937,8 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
             },
             lightDir
         );
+
+        if (highLOD) setPlanetPalette(planet);
     }
 }
 
