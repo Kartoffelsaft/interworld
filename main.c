@@ -64,6 +64,57 @@ size_t strlen(char const * s) {
     return n;
 }
 
+typedef struct {
+    void* head;
+    void* buf;
+    size_t bufsize;
+} BufferAllocInfo;
+
+void bufferAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
+    BufferAllocInfo* a = info;
+    size_t osAligned = ((oldSize-1)/8 + 1)*8;
+    size_t nsAligned = ((newSize-1)/8 + 1)*8;
+
+    switch (op) {
+        case ALLOC:
+            if (a->head + nsAligned > a->buf + a->bufsize) {
+                *ptr = NULL;
+            } else {
+                *ptr = a->head;
+                a->head += nsAligned;
+            }
+            break;
+        case FREE:
+            a->head = *ptr;
+            break;
+        case REALLOC:
+            if (*ptr + osAligned == a->head) {
+                // TODO: doesn't check if there's enough space but I am lazy right now
+                a->head = *ptr + nsAligned;
+            } else {
+                trace("WARNING: tick allocator can only realloc last alloc", 1);
+            }
+            break;
+        case EMPTY:
+            a->head = a->buf;
+            break;
+    }
+}
+
+void initBufferAllocator(Allocator* out, Allocator from, size_t size) {
+    BufferAllocInfo* bai = aalloc(from, sizeof(BufferAllocInfo));
+
+    *bai = (BufferAllocInfo){0};
+    bai->buf = aalloc(from, size);
+    bai->head = bai->buf;
+    bai->bufsize = size;
+
+    *out = (Allocator){
+        .info = bai,
+        .operate = bufferAllocOp,
+    };
+}
+
 struct PairTickAllocInfo_s;
 struct PairPersistAllocInfo_s;
 typedef struct PairTickAllocInfo_s {
@@ -158,14 +209,16 @@ void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
 Allocator tickAllocator;
 Allocator persistAllocator;
 
+Allocator currentSystemAllocator;
+
 size_t freeMemory() {
     return ((PairPersistAllocInfo*)persistAllocator.info)->head - ((PairTickAllocInfo*)tickAllocator.info)->head;
 }
 
-void persistify(void** oldPtr, size_t size) {
-    void* newPtr = aalloc(persistAllocator, size);
+void changeAllocator(void** oldPtr, size_t size, Allocator from, Allocator to) {
+    void* newPtr = aalloc(to, size);
     memcpy(newPtr, *oldPtr, size);
-    afree(tickAllocator, *oldPtr, size);
+    afree(from, *oldPtr, size);
     *oldPtr = newPtr;
 }
 
@@ -434,7 +487,7 @@ int writeFloat(char* buf, float x) {
     return rest-buf;
 }
 
-char* generateName() {
+char* generateName(Allocator where) {
     char* output = aalloc(tickAllocator, 1);
     if (output == NULL) return NULL;
     char* consonants = "QWRTYPSDFGHJKLZXCVBNM";
@@ -451,7 +504,9 @@ char* generateName() {
         output[i*2+2] = 0;
     }
 
-    persistify((void**)&output, strlen(output)+1);
+    if (where.info != tickAllocator.info) {
+        changeAllocator((void**)&output, strlen(output)+1, tickAllocator, where);
+    }
     return output;
 }
 
@@ -717,7 +772,7 @@ typedef struct{
 } OrbitLine;
 
 OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
-    OrbitLine* ret = aalloc(persistAllocator, sizeof(OrbitLine));
+    OrbitLine* ret = aalloc(currentSystemAllocator, sizeof(OrbitLine));
     Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
 
     ret->points[0] = v3Sub(position, parent);
@@ -768,7 +823,7 @@ CelestialBody generatePlanet() {
 
     CelestialBody planet = {0};
     planet.position = mtx33MulVec(rotYA((float)(rands(0)%4096)), (Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
-    planet.tag = generateName();
+    planet.tag = generateName(currentSystemAllocator);
     planet.type = PLANET;
     planet.info.planet.orbitLine = generateOrbitLine((Vec3){0, 0, 0}, planet.position);
 
@@ -912,6 +967,8 @@ void draw() {
 WASM_EXPORT("BOOT")
 void BOOT() {
     initAllocators(&tickAllocator, &persistAllocator);
+
+    initBufferAllocator(&currentSystemAllocator, persistAllocator, 8192);
 
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
         float x = (float)rands(0) * ((rands(0)& 8)?-1:1);
