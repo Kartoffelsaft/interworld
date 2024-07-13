@@ -343,6 +343,14 @@ Vec2 mtx22MulVec(Mtx22 mtx, Vec2 v) {
     };
 }
 
+Mtx22 mtx22Mul(Mtx22 lhs, Mtx22 rhs) {
+    return (Mtx22){
+        lhs.aa*rhs.aa + lhs.ab*rhs.ba, lhs.aa*rhs.ab + lhs.ab*rhs.bb,
+        lhs.ba*rhs.aa + lhs.bb*rhs.ba, lhs.ba*rhs.ab + lhs.bb*rhs.bb,
+    };
+}
+
+
 Mtx33 rotX(float theta) {
     float s = sinf(theta);
     float c = cosf(theta);
@@ -529,7 +537,7 @@ typedef struct {
     char const * tag;
 } DeferredPOI;
 
-#define MAX_DEFERRED_POINTS_OF_INTEREST 4
+#define MAX_DEFERRED_POINTS_OF_INTEREST 8
 DeferredPOI deferredPOIs[MAX_DEFERRED_POINTS_OF_INTEREST] = {0};
 
 Vec2 screenShake;
@@ -688,6 +696,7 @@ typedef struct {
 } Star;
 typedef struct {
     float radius;
+    float surfaceStretchFactor;
     OrbitLine* orbitLine;
     uint8_t colorClouds[3];
     uint8_t colorSea[3];
@@ -708,12 +717,15 @@ typedef struct {
     } info;
 } CelestialBody;
 
-#define MAX_SYSTEM_OBJECT_COUNT 4
+#define MAX_SYSTEM_OBJECT_COUNT 8
 CelestialBody celestialBodies[MAX_SYSTEM_OBJECT_COUNT] = {0};
 
 CelestialBody generatePlanet() {
     enum {
-        TERRESTRIAL,
+        GAIA,
+        DESERT,
+        ICY,
+        JUPITER,
         PLANET_VARIETY,
     } kind = rands(0) % PLANET_VARIETY;
 
@@ -728,8 +740,9 @@ CelestialBody generatePlanet() {
     colorVarier[1] &= 0x3f3f3f3f;
 
     switch (kind) {
-        case TERRESTRIAL:
+        case GAIA:
             planet.info.planet.radius = ((rands(0)%128 + 64) / 196.0);
+            planet.info.planet.surfaceStretchFactor = 1.0;
             planet.info.planet.colorClouds[0] = 0xF4;
             planet.info.planet.colorClouds[1] = 0xF4;
             planet.info.planet.colorClouds[2] = 0xF4;
@@ -739,6 +752,45 @@ CelestialBody generatePlanet() {
             planet.info.planet.colorLand  [0] = 0x4C;
             planet.info.planet.colorLand  [1] = 0x81;
             planet.info.planet.colorLand  [2] = 0x28;
+            break;
+        case DESERT:
+            planet.info.planet.radius = ((rands(0)%128 + 64) / 196.0);
+            planet.info.planet.surfaceStretchFactor = 1.0;
+            planet.info.planet.colorClouds[0] = 0xF4;
+            planet.info.planet.colorClouds[1] = 0xF4;
+            planet.info.planet.colorClouds[2] = 0x90;
+            planet.info.planet.colorSea   [0] = 0xA8;
+            planet.info.planet.colorSea   [1] = 0x88;
+            planet.info.planet.colorSea   [2] = 0x4C;
+            planet.info.planet.colorLand  [0] = 0xE2;
+            planet.info.planet.colorLand  [1] = 0xC8;
+            planet.info.planet.colorLand  [2] = 0x77;
+            break;
+        case ICY:
+            planet.info.planet.radius = ((rands(0)%128 + 32) / 256.0);
+            planet.info.planet.surfaceStretchFactor = 1.0;
+            planet.info.planet.colorClouds[0] = 0xF4;
+            planet.info.planet.colorClouds[1] = 0xF4;
+            planet.info.planet.colorClouds[2] = 0xF4;
+            planet.info.planet.colorSea   [0] = 0x90;
+            planet.info.planet.colorSea   [1] = 0x90;
+            planet.info.planet.colorSea   [2] = 0x90;
+            planet.info.planet.colorLand  [0] = 0xC2;
+            planet.info.planet.colorLand  [1] = 0xC8;
+            planet.info.planet.colorLand  [2] = 0xC9;
+            break;
+        case JUPITER:
+            planet.info.planet.radius = ((rands(0)%128 + 32) / 64.0);
+            planet.info.planet.surfaceStretchFactor = 3.0;
+            planet.info.planet.colorClouds[0] = 0x90;
+            planet.info.planet.colorClouds[1] = 0x61;
+            planet.info.planet.colorClouds[2] = 0x4D;
+            planet.info.planet.colorSea   [0] = 0xC8;
+            planet.info.planet.colorSea   [1] = 0x8B;
+            planet.info.planet.colorSea   [2] = 0x3A;
+            planet.info.planet.colorLand  [0] = 0xD3;
+            planet.info.planet.colorLand  [1] = 0x9C;
+            planet.info.planet.colorLand  [2] = 0x7E;
             break;
         case PLANET_VARIETY: break;
     }
@@ -776,7 +828,7 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
     float lightSlope = -lightNorm.x / lightNorm.y;
 
     float invR = 1/r;
-    for (float j = -r; j < +r; j+=1)
+    for (float j = -r; j < +r; j+=1) {
     for (float i = -sqrtf(r*r-j*j)+0.5; i < +r; i+=2) {
         float thisr2 = i*i + j*j;
         if (thisr2 > r*r) break;
@@ -826,7 +878,7 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
                 FRAMEBUFFER->SCREEN[(sj*WIDTH + si)/2] |= 0x88;
             }
         }
-    }
+    }}
 
     return true;
 
@@ -923,18 +975,21 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
     if (bvi->visPos.z > 0) {
         Vec3 visPole = v3Sub(mtx33MulVec(pvi->invRot, v3Add(bvi->relPos, (Vec3){0, 1, 0})), bvi->visPos);
         Vec2 poleDir = v2Norm((Vec2){visPole.x, visPole.y});
-        //Vec3 visLightPos = mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, playerPos));
-        //Vec3 lightDir = mtx33MulVec(mtx33LookAt(v3Sub(visLightPos, bvi->visPos)), (Vec3){0, 0, 1});
-        //Vec3 lightDir = (Vec3){0.707, 0.001, -0.707};
         Vec3 lightDir = v3Norm(mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, bvi->realPos)));
-        bool highLOD = drawPlanetSurface(bvi->screenspacePos, (FHEIGHT/2)*planet->radius*bvi->distInv, 
+        Mtx22 texTransform = (Mtx22){
+            poleDir.x, poleDir.y,
+           -poleDir.y, poleDir.x,
+        };
+        texTransform = mtx22Mul((Mtx22){planet->surfaceStretchFactor, 0, 0, 1/planet->surfaceStretchFactor}, texTransform);
+
+        bool highLOD = drawPlanetSurface(
+            bvi->screenspacePos, 
+            (FHEIGHT/2)*planet->radius*bvi->distInv, 
             (Vec2){
                 -asinf(bvi->relPos.y*bvi->distInv)*8, 
                 acosf(bvi->relPos.x*bvi->distInv)*(bvi->relPos.z<0?1:-1)*INV_PI*8
-            },(Mtx22){
-                poleDir.x, poleDir.y,
-               -poleDir.y, poleDir.x,
             },
+            texTransform,
             lightDir
         );
 
@@ -1018,6 +1073,9 @@ void BOOT() {
     celestialBodies[1] = generatePlanet();
     celestialBodies[2] = generatePlanet();
     celestialBodies[3] = generatePlanet();
+    celestialBodies[4] = generatePlanet();
+    celestialBodies[5] = generatePlanet();
+    celestialBodies[6] = generatePlanet();
 }
 
 WASM_EXPORT("TIC")
