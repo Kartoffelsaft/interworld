@@ -20,40 +20,118 @@ uint8_t lastButtonInputs = 0; // btnp doesn't seem to be working right
 #define FWIDTH ((float)WIDTH)
 #define FHEIGHT ((float)HEIGHT)
 
+/**
+ * Convert an integer to a string
+ * @param buf output. Must be long enough for any potential number
+ * @param n number to convert
+ * @return length of written string
+ */
 int writeInt(char* buf, int n);
+
+/**
+ * Write an int to the TIC-80's console
+ * @param n number to print
+ */
 void traceNum(int n) {
     char buf[32] = {0};
     writeInt(buf, n);
     trace(buf, 1);
 }
 
+/**
+ * Specifies which memory operation to do
+ * @see MemFn
+ * @see Allocator
+ */
 typedef enum {
     ALLOC,
     FREE,
     REALLOC,
     EMPTY,
 } MemOperator;
+
+/**
+ * Function pointer for a particular allocator
+ * @param info Arbitrary internal data for the allocator
+ * @param operation Which memory operation is expected
+ * @param ptr In/Out reference to the pointer to act on
+ * @param oldSize The size of memory currently pointed at by *ptr
+ * @param newSize The expected size of memory pointed at by *ptr after calling
+ * @see MemOperator
+ * @see Allocator
+ */
 typedef void (*MemFn)(void* info, MemOperator operation, void** ptr, size_t oldSize, size_t newSize);
+
+/**
+ * Abstract struct for any allocator implementation
+ * @see MemOperator
+ * @see MemFn
+ */
 typedef struct {
+    /**
+     * Function that defines how this allocator manages memory
+     *
+     * @see bufferAllocOp for an example
+     *
+     * @see MemFn
+     */
     MemFn operate;
+
+    /**
+     * Arbitrary data for a given allocator, passed with every allocation
+     * operation for this allocator
+     *
+     * @see BufferAllocInfo for an example
+     */
     void* info;
 } Allocator;
 
+/**
+ * Abstracted memory allocation operation
+ *
+ * @param a Which allocator to retrieve the memory from
+ * @param amount Number of bytes to retrieve
+ * @return pointer to the allocated memory
+ */
 void* aalloc(Allocator a, size_t amount) {
     void* ret = NULL;
     a.operate(a.info, ALLOC, &ret, 0, amount);
     return ret;
 }
+/**
+ * Abstracted memory free operation
+ *
+ * @param a Which allocator the memory came from
+ * @param what Pointer to the memory to free
+ * @param amount Size of the memory getting freed
+ */
 void afree(Allocator a, void* what, size_t amount) {
     a.operate(a.info, FREE, &what, amount, 0);
 }
+/**
+ * Abstracted memory reallocation operation
+ *
+ * @param a Which allocator the memory came from
+ * @param what In/Out reference to pointer that will have data resized
+ * @param oldSize Current size of the memory pointed to by *ptr
+ * @param newSize Desired size of the memory pointed to by *ptr
+ */
 void arealloc(Allocator a, void** what, size_t oldSize, size_t newSize) {
     a.operate(a.info, REALLOC, what, oldSize, newSize);
 }
+/**
+ * Abstracted memory empty operation
+ *
+ * This frees all of the data of a particular allocator, invalidating all
+ * pointers allocated by it. @see afree for freeing just a single pointer
+ *
+ * @param a Allocator to empty
+ */
 void aempty(Allocator a) {
     a.operate(a.info, EMPTY, NULL, 0, 0);
 }
 
+// Included because certain c stdlib stuff won't get linked for whatever reason
 void* memcpy(void* restrict dest, void const * restrict src, size_t n) {
     for (int i = 0; i < n; i++) *(uint8_t*)(dest++) = *(uint8_t*)(src++);
     return dest-n;
@@ -65,12 +143,36 @@ size_t strlen(char const * s) {
     return n;
 }
 
+/**
+ * Move memory from one allocator to another
+ *
+ * @param oldPtr reference to the pointer to move
+ * @param size Number of bytes pointed to by *oldPtr
+ * @param from The allocator *oldPtr is currently pointing to
+ * @param to The allocator to move the memory to
+ */
+void changeAllocator(void** oldPtr, size_t size, Allocator from, Allocator to) {
+    void* newPtr = aalloc(to, size);
+    memcpy(newPtr, *oldPtr, size);
+    afree(from, *oldPtr, size);
+    *oldPtr = newPtr;
+}
+
 typedef struct {
     void* head;
     void* buf;
     size_t bufsize;
 } BufferAllocInfo;
 
+/**
+ * Buffer allocator implementation
+ *
+ * SUPPORTS:
+ * - ALLOC
+ * - FREE (only for last alloc)
+ * - REALLOC (only for last alloc)
+ * - EMPTY
+ */
 void bufferAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
     BufferAllocInfo* a = info;
     size_t osAligned = ((oldSize-1)/8 + 1)*8;
@@ -102,6 +204,13 @@ void bufferAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_
     }
 }
 
+/**
+ * Create a buffer allocator, using another allocator as a backing
+ *
+ * @param out Where to put the buffer allocator
+ * @param from Where the memory for the buffer allocator comes from
+ * @param size The maximum data to be managed by the buffer allocator
+ */
 void initBufferAllocator(Allocator* out, Allocator from, size_t size) {
     BufferAllocInfo* bai = aalloc(from, sizeof(BufferAllocInfo));
 
@@ -185,6 +294,9 @@ void pairPersistAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, 
     }
 }
 
+/**
+ * Set up the tick and persist allocators using the memory given by the TIC-80
+ */
 void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
     // add some amount to avoid .rodata and .data sections
     // TODO: somehow figure that out automatically
@@ -207,20 +319,32 @@ void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
     ((PairPersistAllocInfo*)persistAllocator->info)->other = tickAllocator->info;
 }
 
+/**
+ * Allocator for memory needed for a single frame. All allocations from this
+ * allocator are freed at the end of the frame
+ *
+ * @see PairTickAllocInfo
+ * @see pairTickAllocOp
+ */
 Allocator tickAllocator;
+/**
+ * Allocator for memory kept between frames.
+ *
+ * @see PairPersistAllocInfo
+ * @see pairPersistAllocOp
+ */
 Allocator persistAllocator;
 
+/**
+ * Allocator for the current system the player is in
+ */
 Allocator currentSystemAllocator;
 
+/**
+ * @return the amount of memory free between the tick and persist allocators
+ */
 size_t freeMemory() {
     return ((PairPersistAllocInfo*)persistAllocator.info)->head - ((PairTickAllocInfo*)tickAllocator.info)->head;
-}
-
-void changeAllocator(void** oldPtr, size_t size, Allocator from, Allocator to) {
-    void* newPtr = aalloc(to, size);
-    memcpy(newPtr, *oldPtr, size);
-    afree(from, *oldPtr, size);
-    *oldPtr = newPtr;
 }
 
 uint32_t rands(uint64_t iseed) {
@@ -318,6 +442,10 @@ Mtx33 mtx33Mul(Mtx33 lhs, Mtx33 rhs) {
     };
 }
 
+/**
+ * Inverts a 3x3 matrix, but without scaling by the determinant. Useful if you
+ * know the determinant of your matrix is 1
+ */
 Mtx33 invUnscaled(Mtx33 mtx) {
     return (Mtx33){
         mtx.bb*mtx.cc - mtx.bc*mtx.cb, mtx.ac*mtx.cb - mtx.ab*mtx.cc, mtx.ab*mtx.bc - mtx.ac*mtx.bb,
@@ -380,8 +508,18 @@ Mtx33 rotZ(float theta) {
     };
 }
 
+/**
+ * Approximate sin, included because for some reason -lm isn't working
+ */
 float sinfa(float);
+/**
+ * Approximate cos, included because for some reason -lm isn't working
+ */
 float cosfa(float);
+
+/**
+ * 3x3 matrix to rotate around X, approximate
+ */
 Mtx33 rotXA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
@@ -391,6 +529,9 @@ Mtx33 rotXA(float theta) {
         0, s, c,
     };
 }
+/**
+ * 3x3 matrix to rotate around Y, approximate
+ */
 Mtx33 rotYA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
@@ -400,6 +541,9 @@ Mtx33 rotYA(float theta) {
        -s, 0, c,
     };
 }
+/**
+ * 3x3 matrix to rotate around Z, approximate
+ */
 Mtx33 rotZA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
@@ -424,16 +568,19 @@ float asinf(float x) {
     return PI - acosf(x);
 }
 
+// Documented in forward declaration
 float sinfa(float x) {
     x *= 1/(2*PI);
     x -= (int)x;
     if (x < 0.5) return -8 * x * (2*x - 1);
     else return 8 * x * (2*x - 3) + 8;
 }
+// Documented in forward declaration
 float cosfa(float x) {
     return sinfa(x + PI/2);
 }
 
+// Documented in forward declaration
 int writeInt(char* buf, int x) {
     if (x == 0) {
         buf[0] = '0';
@@ -468,6 +615,13 @@ int writeInt(char* buf, int x) {
     return ret;
 }
 
+/**
+ * Convert an float to a string
+ *
+ * @param buf output. Must be long enough for any potential number
+ * @param n number to convert
+ * @return length of written string
+ */
 int writeFloat(char* buf, float x) {
     char* rest = buf;
 
@@ -495,7 +649,12 @@ int writeFloat(char* buf, float x) {
     return rest-buf;
 }
 
-// assumes str is in the tick allocator
+/**
+ * Append to a given string.
+ *
+ * @param str Reference to string to append to. Assumed to be allocated under @see tickAllocator
+ * @param appicand String to append to *str
+ */
 void stringAppend(char** str, char* appicand) {
     if (appicand == NULL) return;
     if (str == NULL) return;
@@ -514,6 +673,12 @@ void stringAppend(char** str, char* appicand) {
     (*str)[sl+al] = '\0';
 }
 
+/**
+ * Generate a name for a planet / star / etc.
+ *
+ * @param where Where the return string will be placed
+ * @return The generated name
+ */
 char* generateName(Allocator where) {
     char* output = aalloc(tickAllocator, 1);
     if (output == NULL) return NULL;
@@ -583,30 +748,43 @@ char* generateName(Allocator where) {
     return output;
 }
 
+// TODO: put into struct
 Mtx33 playerRot = MATRIX33_IDENTITY;
 Vec3 playerPos = {0, 0, -50};
 float playerSpeed = 0;
 
+/** The currently selected option in the pilot menu */
 int8_t menuOpt = 0;
 #define MENU_OPT_COUNT 8
+
+/** bitfield of options in the pilot menu that are enabled */
 uint8_t enabledMenuOpts = 0;
 #define MENU_OPTION_DAMPENERS 0x01
 #define MENU_OPTION_ORRERY 0x02
 #define MENU_OPTION_MAP 0x04
 #define MENU_OPTION_DEBUG 0x80
 
+/**
+ * Defines information about how and where to place markers on screen for
+ * various objects. Deferred so that it gets drawn on top of other objects
+ */
 typedef struct {
-    bool show;
-    bool selected;
-    Vec2 screenPos;
-    char const * tag;
+    bool show; /** whether to draw this. you probably want to enable this */
+    bool selected; /** whether the player has this POI node focused */
+    Vec2 screenPos; /** where on screen the center of the sprite is, in terms of pixels */
+    char const * tag; /** label to show when selected. Nullable */
 } DeferredPOI;
 
 #define MAX_DEFERRED_POINTS_OF_INTEREST 8
+/** list of points to defer this frame */
 DeferredPOI deferredPOIs[MAX_DEFERRED_POINTS_OF_INTEREST] = {0};
 
+/** Offset of the cockpit on screen */
 Vec2 screenShake;
 
+/**
+ * Draw elements of the hud that appear behind the cockpit
+ */
 void drawBackHud() {
     uint8_t transparentColor = 0;
 
@@ -646,6 +824,9 @@ void drawBackHud() {
     }
 }
 
+/**
+ * Draw elements of the hud that appear in front of the cockpit
+ */
 void drawFrontHud() {
     uint8_t transparentColor = 0;
 
@@ -664,6 +845,7 @@ void drawFrontHud() {
 void drawCockpit() {
     uint8_t transparentColor = 0;
 
+    // TODO: somehow make this a vector image of some sort rather than manual
     tri(
         -10 + screenShake.x, 20     + screenShake.y, 
         100 + screenShake.x, HEIGHT + screenShake.y, 
@@ -711,35 +893,28 @@ void drawCockpit() {
     );
 }
 
-uint64_t noiseMap[] = {
-    0x0001000010001100,
-    0x0000011000011100,
-    0x0011111010021000,
-    0x0011211010000001,
-    0x1011112211110001,
-    0x2211212211211000,
-    0x2112122100120011,
-    0x0011122000000000,
-    0x0011222111001110,
-    0x0000112111001100,
-    0x0001122100000100,
-    0x0010112100001100,
-    0x1000111100101111,
-    0x0010000000000000,
-    0x0022100011122100,
-    0x0001010012221100,
-};
-
 uint64_t frame = 0;
 
 #define SKYBOX_STAR_COUNT 64
+/** Random distant points in 3d space to mimic stars */
 Vec3 skyboxStars[SKYBOX_STAR_COUNT];
 
 #define ORBIT_LINE_RESOLUTION 20
+/**
+ * Static array of points that form a circle (and perhaps in future an ellipse).
+ * Used for the orrery. @see MENU_OPTION_ORRERY
+ */
 typedef struct{
     Vec3 points[ORBIT_LINE_RESOLUTION];
 } OrbitLine;
 
+/**
+ * Create a plausible orbit line for an object. Uses the system allocator
+ *
+ * @param parent The object the object orbits around
+ * @param position Where the object is
+ * @return The generated orbit line
+ */
 OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
     OrbitLine* ret = aalloc(currentSystemAllocator, sizeof(OrbitLine));
     Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
@@ -756,18 +931,29 @@ OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
     return ret;
 }
 
+/** Data specific to a star */
 typedef struct {
     float radius;
 } Star;
+/** Data specific to a planet */
 typedef struct {
     float radius;
-    float surfaceStretchFactor;
+
+    /** 
+     * how "stretched" the surface looks when drawn. Used for gas giants and such
+     */
+    float surfaceStretchFactor; 
+
     OrbitLine* orbitLine;
-    uint8_t colorClouds[3];
-    uint8_t colorSea[3];
-    uint8_t colorLand[3];
+
+    uint8_t colorClouds[3]; /** rgb triplet */
+    uint8_t colorSea[3]; /** rgb triplet */
+    uint8_t colorLand[3]; /** rgb triplet */
 } Planet;
 
+/**
+ * Object present in a solar system
+ */
 typedef struct {
     enum {
         INVALID = 0,
@@ -775,7 +961,7 @@ typedef struct {
         PLANET,
     } type;
     Vec3 position;
-    char* tag;
+    char* tag; /** @see DeferredPOI */
     union {
         Star star;
         Planet planet;
@@ -867,7 +1053,12 @@ CelestialBody generatePlanet() {
     return planet;
 }
 
-void setPlanetPalette(Planet* planet) {
+/**
+ * Update TIC-80's palette to render a specific planet
+ *
+ * @param planet Planet to use palette info from
+ */
+void setPlanetPalette(Planet const * planet) {
     int const CLOUD_SHADE = 0x4;
     int const WATER_SHADE = 0x5;
     int const LAND_SHADE  = 0x6;
@@ -881,6 +1072,39 @@ void setPlanetPalette(Planet* planet) {
     }
 }
 
+/**
+ * A 4bpp image of hand-generated noise, values currently ranging from 0-2.
+ * 16x16 with each uint64_t representing a full row.
+ */
+uint64_t noiseMap[] = {
+    0x0001000010001100,
+    0x0000011000011100,
+    0x0011111010021000,
+    0x0011211010000001,
+    0x1011112211110001,
+    0x2211212211211000,
+    0x2112122100120011,
+    0x0011122000000000,
+    0x0011222111001110,
+    0x0000112111001100,
+    0x0001122100000100,
+    0x0010112100001100,
+    0x1000111100101111,
+    0x0010000000000000,
+    0x0022100011122100,
+    0x0001010012221100,
+};
+
+/**
+ * Render the planet to a particular position on screen
+ *
+ * @param pos Center of the planet visually on screen, in pixels
+ * @param r Visual radius, in pixels
+ * @param texOffset Amount to shift noise image, helpful to mimic viewing from different angles
+ * @param texTransform Applied to noise texture, helpful for rotating / stretching ground
+ * @param lightDir unit direction light comes from, from view perspective
+ * @return whether high LOD
+ */
 bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Vec3 lightDir) {
     if (r < 4) {
         circ(pos.x, pos.y, r, 13);
@@ -987,6 +1211,7 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
     //}
 }
 
+/** information relevant to rendering a celestial body */
 typedef struct {
     Vec3 realPos;
     Vec3 relPos;
@@ -1006,6 +1231,7 @@ void initBodyVisualInfo(BodyVisualInfo *self, Vec3 bodyPos, Vec3 playerPos, Mtx3
     self->screenspacePos = (Vec2){self->visPos.x*self->dz + FWIDTH/2, self->visPos.y*self->dz + FHEIGHT/2};
 }
 
+/** common information relevant to rendering things from the player's perspective */
 typedef struct {
     Mtx33 rot;
     Mtx33 invRot;
@@ -1017,7 +1243,13 @@ void initPlayerVisualInfo(PlayerVisualInfo* self) {
     self->forward = mtx33MulVec(playerRot, (Vec3){0, 0, 1});
 }
 
-void drawOrbitLine(PlayerVisualInfo* pvi, OrbitLine* orbitLine) {
+/**
+ * Draw an orbit line to the screen
+ *
+ * @param pvi Perspective info to draw from
+ * @param orbitLine The orbit line to draw
+ */
+void drawOrbitLine(PlayerVisualInfo const * pvi, OrbitLine const * orbitLine) {
     if (enabledMenuOpts & MENU_OPTION_ORRERY) {
         Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], playerPos));
         for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
@@ -1034,7 +1266,14 @@ void drawOrbitLine(PlayerVisualInfo* pvi, OrbitLine* orbitLine) {
     }
 }
 
-void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
+/**
+ * Draw a planet to the screen
+ *
+ * @param pvi Perspective info to draw from
+ * @param bvi Body info to draw
+ * @param planet Planet to draw
+ */
+void drawPlanet(PlayerVisualInfo const * pvi, BodyVisualInfo const * bvi, Planet const * planet) {
     drawOrbitLine(pvi, planet->orbitLine);
 
     if (bvi->visPos.z > 0) {
@@ -1062,7 +1301,14 @@ void drawPlanet(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Planet* planet) {
     }
 }
 
-void drawStar(PlayerVisualInfo* pvi, BodyVisualInfo* bvi, Star* star) {
+/**
+ * Draw a star to the screen
+ *
+ * @param pvi Perspective info to draw from
+ * @param bvi Body info to draw
+ * @param star Star to draw
+ */
+void drawStar(PlayerVisualInfo const * pvi, BodyVisualInfo const * bvi, Star const * star) {
     if (bvi->visPos.z > 0) {
         circ(bvi->screenspacePos.x, bvi->screenspacePos.y, (FHEIGHT/2)*star->radius*bvi->distInv, 8);
     }
