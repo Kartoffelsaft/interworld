@@ -769,10 +769,10 @@ uint8_t enabledMenuOpts = 0;
  * various objects. Deferred so that it gets drawn on top of other objects
  */
 typedef struct {
-    bool show; /** whether to draw this. you probably want to enable this */
-    bool selected; /** whether the player has this POI node focused */
     Vec2 screenPos; /** where on screen the center of the sprite is, in terms of pixels */
     char const * tag; /** label to show when selected. Nullable */
+    bool show:1; /** whether to draw this. you probably want to enable this */
+    bool selected:1; /** whether the player has this POI node focused */
 } DeferredPOI;
 
 #define MAX_DEFERRED_POINTS_OF_INTEREST 8
@@ -842,55 +842,65 @@ void drawFrontHud() {
     pix(WIDTH/2, HEIGHT/2, 3);
 }
 
+typedef struct {
+    int16_t x;
+    int16_t y;
+} TrianglePoint;
+
+typedef struct {
+    uint16_t pointIds[3];
+    uint8_t color:4;
+} Triangle;
+
+/**
+ * Draw a list of triangles to the screen
+ *
+ * @param tris Array of tringles to draw
+ * @param nTris number of triangles
+ * @param pts Array of points indexed by tris
+ * @param offset shift of triangles on screen
+ */
+void drawTriangles(Triangle const * tris, size_t nTris, TrianglePoint const * pts, Vec2 offset) {
+    for (int i = 0; i < nTris; i++) {
+        Triangle const * t = &tris[i];
+        tri(
+            pts[t->pointIds[0]].x + offset.x, pts[t->pointIds[0]].y + offset.y, 
+            pts[t->pointIds[1]].x + offset.x, pts[t->pointIds[1]].y + offset.y, 
+            pts[t->pointIds[2]].x + offset.x, pts[t->pointIds[2]].y + offset.y, 
+
+            t->color
+        );
+    }
+}
+
 void drawCockpit() {
     uint8_t transparentColor = 0;
 
-    // TODO: somehow make this a vector image of some sort rather than manual
-    tri(
-        -10 + screenShake.x, 20     + screenShake.y, 
-        100 + screenShake.x, HEIGHT + screenShake.y, 
-        -10 + screenShake.x, 30     + screenShake.y, 
+    TrianglePoint pts[] = (TrianglePoint[]) {
+        {     -10, 20       },// 0
+        {     100, HEIGHT   },// 1
+        {     -10, 30       },// 2
+        {      90, HEIGHT   },// 3
+        {WIDTH+10, 20       },// 4
+        {     140, HEIGHT   },// 5
+        {WIDTH+10, 30       },// 6
+        {     150, HEIGHT   },// 7
+        {      80, HEIGHT-20},// 8
+        {WIDTH-80, HEIGHT-20},// 9
+        {     -10, HEIGHT+10},//10
+        {WIDTH+10, HEIGHT+10},//11
+    };
 
-        9
-    );
+    Triangle tris[] = (Triangle[]) {
+        {{ 0,  1,  2}, 9},
+        {{ 1,  3,  2}, 9},
+        {{ 4,  5,  6}, 9},
+        {{ 5,  7,  6}, 9},
+        {{ 8,  9, 10}, 1},
+        {{ 9, 11, 10}, 1},
+    };
 
-    tri(
-        100 + screenShake.x, HEIGHT + screenShake.y, 
-        90  + screenShake.x, HEIGHT + screenShake.y, 
-        -10 + screenShake.x, 30     + screenShake.y, 
-
-        9
-    );
-    tri(
-        WIDTH + 10 + screenShake.x, 20     + screenShake.y, 
-        140        + screenShake.x, HEIGHT + screenShake.y, 
-        WIDTH + 10 + screenShake.x, 30     + screenShake.y, 
-
-        9
-    );
-
-    tri(
-        140        + screenShake.x, HEIGHT + screenShake.y, 
-        150        + screenShake.x, HEIGHT + screenShake.y, 
-        WIDTH + 10 + screenShake.x, 30     + screenShake.y, 
-
-        9
-    );
-
-    tri(
-        80       + screenShake.x, HEIGHT-20 + screenShake.y,
-        WIDTH-80 + screenShake.x, HEIGHT-20 + screenShake.y,
-        -10      + screenShake.x, HEIGHT+10 + screenShake.y,
-
-        1
-    );
-    tri(
-        WIDTH-80 + screenShake.x, HEIGHT-20 + screenShake.y,
-        WIDTH+10 + screenShake.x, HEIGHT+10 + screenShake.y,
-        -10      + screenShake.x, HEIGHT+10 + screenShake.y,
-
-        1
-    );
+    drawTriangles(tris, 6, pts, screenShake);
 }
 
 uint64_t frame = 0;
