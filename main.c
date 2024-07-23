@@ -59,6 +59,7 @@ void* memcpy(void* restrict dest, void const * restrict src, size_t n) {
     return dest-n;
 }
 size_t strlen(char const * s) {
+    if (s == NULL) return 0;
     size_t n = 0;
     while(*(s++)) n++;
     return n;
@@ -494,21 +495,86 @@ int writeFloat(char* buf, float x) {
     return rest-buf;
 }
 
+// assumes str is in the tick allocator
+void stringAppend(char** str, char* appicand) {
+    if (appicand == NULL) return;
+    if (str == NULL) return;
+    if (*str == NULL) return; // could copy appicand into tick alloc if needed
+
+    size_t al = strlen(appicand);
+    if (al == 0) return;
+
+    size_t sl = strlen(*str);
+
+    arealloc(tickAllocator, (void**)str, sl+1, sl+al+1);
+
+    for (int i = 0; i < al; i++) {
+        (*str)[sl+i] = appicand[i];
+    }
+    (*str)[sl+al] = '\0';
+}
+
 char* generateName(Allocator where) {
     char* output = aalloc(tickAllocator, 1);
     if (output == NULL) return NULL;
-    char* consonants = "QWRTYPSDFGHJKLZXCVBNM";
-    size_t consonant_n = strlen(consonants);
-    char* vowels = "AEIOUY";
-    size_t vowel_n = strlen(vowels);
+    *output = '\0';
 
-    for (int i = 0; i < 4; i++) {
-        size_t consonants_i = rands(0) % consonant_n;
-        size_t vowel_i = rands(0) % vowel_n;
-        arealloc(tickAllocator, (void**)&output, i*2+1, i*2+3);
-        output[i*2+0] = consonants[consonants_i];
-        output[i*2+1] = vowels[vowel_i];
-        output[i*2+2] = 0;
+    char* consonants = 
+        "QU\0"
+        "TH\0"
+        "SH\0"
+        "CH\0"
+        "PH\0"
+        "W\0\0"
+        "R\0\0"
+        "T\0\0"
+        "Y\0\0"
+        "P\0\0"
+        "S\0\0"
+        "D\0\0"
+        "F\0\0"
+        "G\0\0"
+        "H\0\0"
+        "J\0\0"
+        "K\0\0"
+        "L\0\0"
+        "Z\0\0"
+        "X\0\0"
+        "C\0\0"
+        "V\0\0"
+        "B\0\0"
+        "N\0\0"
+        "M\0\0"
+        "\0\0\0";
+    size_t const MAX_CONSONANT_WIDTH = 3;
+    size_t consonant_n = 26;
+    char* vowels = 
+        "EE\0"
+        "OO\0"
+        "IE\0"
+        "EI\0"
+        "AE\0"
+        "A\0\0"
+        "E\0\0"
+        "I\0\0"
+        "O\0\0"
+        "U\0\0"
+        "Y\0\0"
+        "\0\0\0";
+    size_t const MAX_VOWEL_WIDTH = 3;
+    size_t vowel_n = 12;
+
+    int lengthModifier = (rands(0)%3)+2;
+    for (int i = 0; i < lengthModifier; i++) {
+        size_t consonant_i = (rands(0) % consonant_n)*MAX_CONSONANT_WIDTH;
+        size_t vowel_i = (rands(0) % vowel_n)*MAX_VOWEL_WIDTH;
+        stringAppend(&output, consonants+consonant_i);
+        stringAppend(&output, vowels+vowel_i);
+
+        if (rands(0) % 4 == 0) {
+            consonant_i = (rands(0) % consonant_n)*MAX_CONSONANT_WIDTH;
+            stringAppend(&output, consonants+consonant_i);
+        }
     }
 
     if (where.info != tickAllocator.info) {
@@ -1176,9 +1242,30 @@ int main() {
     ((PairPersistAllocInfo*)persistAllocator.info)->start = data+0x10000;
     ((PairPersistAllocInfo*)persistAllocator.info)->other = tickAllocator.info;
 
-    printf("%s\n", generateName());
-    printf("%s\n", generateName());
-    printf("%s\n", generateName());
+    initBufferAllocator(&currentSystemAllocator, persistAllocator, 8192);
+
+    printf("%d\n", strlen("hello"));
+
+    char* str = aalloc(tickAllocator, 1);
+    *str = '\0';
+
+    stringAppend(&str, "test 1");
+    stringAppend(&str, "test 2");
+    stringAppend(&str, "test G");
+    printf("%s\n", str);
+
+    afree(tickAllocator, str, strlen(str)+1);
+    str = aalloc(tickAllocator, 1);
+    *str = '\0';
+
+    stringAppend(&str, "hello,");
+    stringAppend(&str, " ");
+    stringAppend(&str, "WORLD!!!");
+    printf("%s\n", str);
+
+    printf("%s\n", generateName(tickAllocator));
+    printf("%s\n", generateName(tickAllocator));
+    printf("%s\n", generateName(tickAllocator));
 
     for (float i = 0; i < 2*PI; i += 0.1) {
         printf("sin(%6.6f)=%6.6f\n", i, sinfa(i));
