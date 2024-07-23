@@ -483,8 +483,7 @@ int writeFloat(char* buf, float x) {
     *rest = '.';
     rest++;
 
-#define PRECISION 3
-    for (int i = 0; i < PRECISION; i++) {
+    for (int i = 0; i < 3; i++) {
         fpart *= 10;
         *rest = '0'+fpart;
         rest++;
