@@ -754,15 +754,25 @@ Vec3 playerPos = {0, 0, -50};
 float playerSpeed = 0;
 
 /** The currently selected option in the pilot menu */
-int8_t menuOpt = 0;
-#define MENU_OPT_COUNT 8
+int8_t toggleableMenuOptSelection = 0;
+#ifndef NDEBUG
+#define TOGGLEABLE_MENU_OPTION_COUNT 8
+#else
+#define TOGGLEABLE_MENU_OPTION_COUNT 2
+#endif
 
 /** bitfield of options in the pilot menu that are enabled */
 uint8_t enabledMenuOpts = 0;
-#define MENU_OPTION_DAMPENERS 0x01
-#define MENU_OPTION_ORRERY 0x02
-#define MENU_OPTION_MAP 0x04
-#define MENU_OPTION_DEBUG 0x80
+#define TOGGLEABLE_MENU_OPTION_DAMPENERS 0x01
+#define TOGGLEABLE_MENU_OPTION_ORRERY 0x02
+#define TOGGLEABLE_MENU_OPTION_DEBUG 0x80
+
+int8_t triggerableMenuOptSelection = 0;
+
+#define TRIGGERABLE_MENU_OPTION_COUNT 2
+
+#define TRIGGERABLE_MENU_OPTION_INVENTORY 0
+#define TRIGGERABLE_MENU_OPTION_MAP 1
 
 /**
  * Defines information about how and where to place markers on screen for
@@ -788,7 +798,7 @@ Vec2 screenShake;
 void drawBackHud() {
     uint8_t transparentColor = 0;
 
-    if (enabledMenuOpts & MENU_OPTION_DEBUG) {
+    if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_DEBUG) {
         char* buf = aalloc(tickAllocator, 64);
 
         writeFloat(buf, playerSpeed);
@@ -830,13 +840,44 @@ void drawBackHud() {
 void drawFrontHud() {
     uint8_t transparentColor = 0;
 
-    int const start = (WIDTH - 16*MENU_OPT_COUNT)/2;
     if (btn(7)) {
-        for (int i = 0; i<MENU_OPT_COUNT; i++) {
-            spr(288+2*i, start + i*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
-            if (enabledMenuOpts & (1<<i)) spr(258, start + i*16 + 4 + 2*screenShake.x, 36 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 1, 1);
+        int const start = (WIDTH - 16*TOGGLEABLE_MENU_OPTION_COUNT)/2;
+        for (int i = 0; i<TOGGLEABLE_MENU_OPTION_COUNT; i++) {
+            spr(288+2*i, 
+                start + i*16 + 2*screenShake.x, 
+                20 + 2*screenShake.y, 
+                &transparentColor, 
+                1, 1, false, 0, 2, 2
+            );
+            if (enabledMenuOpts & (1<<i)) {
+                spr(258, 
+                    start + i*16 + 4 + 2*screenShake.x, 
+                    36 + 2*screenShake.y, 
+                    &transparentColor, 
+                    1, 1, false, 0, 1, 1
+                );
+            }
         }
-        spr(256, start + menuOpt*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
+
+        spr(256, start + toggleableMenuOptSelection*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
+
+    } else if (btn(6)) {
+        int const start = (WIDTH - 16*TRIGGERABLE_MENU_OPTION_COUNT)/2;
+        for (int i = 0; i < TRIGGERABLE_MENU_OPTION_COUNT; i++) {
+            spr(320+2*i, 
+                start + i*16 + 2*screenShake.x, 
+                20 + 2*screenShake.y, 
+                &transparentColor, 
+                1, 1, false, 0, 2, 2
+            );
+        }
+
+        spr(256, 
+            start + triggerableMenuOptSelection*16 + 2*screenShake.x, 
+            20 + 2*screenShake.y, 
+            &transparentColor, 
+            1, 1, false, 0, 2, 2
+        );
     }
 
     pix(WIDTH/2, HEIGHT/2, 3);
@@ -912,7 +953,7 @@ Vec3 skyboxStars[SKYBOX_STAR_COUNT];
 #define ORBIT_LINE_RESOLUTION 20
 /**
  * Static array of points that form a circle (and perhaps in future an ellipse).
- * Used for the orrery. @see MENU_OPTION_ORRERY
+ * Used for the orrery. @see TOGGLEABLE_MENU_OPTION_ORRERY
  */
 typedef struct{
     Vec3 points[ORBIT_LINE_RESOLUTION];
@@ -1260,7 +1301,7 @@ void initPlayerVisualInfo(PlayerVisualInfo* self) {
  * @param orbitLine The orbit line to draw
  */
 void drawOrbitLine(PlayerVisualInfo const * pvi, OrbitLine const * orbitLine) {
-    if (enabledMenuOpts & MENU_OPTION_ORRERY) {
+    if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_ORRERY) {
         Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], playerPos));
         for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
             Vec3 thisVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[i], playerPos));
@@ -1366,6 +1407,17 @@ void draw() {
     }
 }
 
+void triggerCurrentSelection() {
+    switch (triggerableMenuOptSelection) {
+        case TRIGGERABLE_MENU_OPTION_INVENTORY:
+            break;
+        case TRIGGERABLE_MENU_OPTION_MAP:
+            break;
+        default:
+            break;
+    }
+}
+
 WASM_EXPORT("BOOT")
 void BOOT() {
     initAllocators(&tickAllocator, &persistAllocator);
@@ -1403,18 +1455,24 @@ WASM_EXPORT("TIC")
 void TIC() {
     screenShake = v2Scale(screenShake, 0.5);
 
-    if (!btn(7)) {
+    if (btn(7)) {
+        if (btn(0)) {enabledMenuOpts |= 1 << toggleableMenuOptSelection;}
+        if (btn(1)) {enabledMenuOpts &= ~(1 << toggleableMenuOptSelection);}
+        if (btn(2) && !(lastButtonInputs&4)) {toggleableMenuOptSelection--;}
+        if (btn(3) && !(lastButtonInputs&8)) {toggleableMenuOptSelection++;}
+        if (toggleableMenuOptSelection<0) toggleableMenuOptSelection = 0;
+        if (toggleableMenuOptSelection>=TOGGLEABLE_MENU_OPTION_COUNT) toggleableMenuOptSelection = TOGGLEABLE_MENU_OPTION_COUNT-1;
+    } else if (btn(6)) {
+        if (btn(0) && !(lastButtonInputs&1)) {triggerCurrentSelection();}
+        if (btn(2) && !(lastButtonInputs&4)) {triggerableMenuOptSelection--;}
+        if (btn(3) && !(lastButtonInputs&8)) {triggerableMenuOptSelection++;}
+        if (triggerableMenuOptSelection<0) triggerableMenuOptSelection = 0;
+        if (triggerableMenuOptSelection>=TRIGGERABLE_MENU_OPTION_COUNT) triggerableMenuOptSelection = TRIGGERABLE_MENU_OPTION_COUNT-1;
+    } else {
         if (btn(0)) {playerRot = mtx33Mul(playerRot, rotX(-0.01)); screenShake.y -= 3;}
         if (btn(1)) {playerRot = mtx33Mul(playerRot, rotX( 0.01)); screenShake.y += 3;}
         if (btn(2)) {playerRot = mtx33Mul(playerRot, rotZ(-0.01));}
         if (btn(3)) {playerRot = mtx33Mul(playerRot, rotZ( 0.01));}
-    } else {
-        if (btn(0)) {enabledMenuOpts |= 1 << menuOpt;}
-        if (btn(1)) {enabledMenuOpts &= ~(1 << menuOpt);}
-        if (btn(2) && !(lastButtonInputs&4)) {menuOpt--;}
-        if (btn(3) && !(lastButtonInputs&8)) {menuOpt++;}
-        if (menuOpt<0) menuOpt = 0;
-        if (menuOpt>=MENU_OPT_COUNT) menuOpt = MENU_OPT_COUNT-1;
     }
 
     Mtx33 const invPlayerRot = invUnscaled(playerRot);
@@ -1424,7 +1482,7 @@ void TIC() {
         float oldPlayerSpeed = playerSpeed;
         if (btn(4)) {playerSpeed += 0.1 * SECONDS_PER_FRAME;}
         if (btn(5)) {playerSpeed -= 0.1 * SECONDS_PER_FRAME;}
-        if (enabledMenuOpts&MENU_OPTION_DAMPENERS && !btn(4) && !btn(5)) {
+        if (enabledMenuOpts&TOGGLEABLE_MENU_OPTION_DAMPENERS && !btn(4) && !btn(5)) {
             if (fabsf(playerSpeed) > 0.05 * SECONDS_PER_FRAME) {
                 if (playerSpeed<0) playerSpeed += 0.05 * SECONDS_PER_FRAME;
                 else playerSpeed -= 0.05 * SECONDS_PER_FRAME;
