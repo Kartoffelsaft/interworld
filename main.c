@@ -748,10 +748,19 @@ char* generateName(Allocator where) {
     return output;
 }
 
+typedef struct {
+    Mtx33 rot;
+    Vec3  pos;
+    float speed;
+} Player;
+
+Player player = (Player){
+    .rot = MATRIX33_IDENTITY,
+    .pos = {0, 0, -50},
+    .speed = 0,
+};
+
 // TODO: put into struct
-Mtx33 playerRot = MATRIX33_IDENTITY;
-Vec3 playerPos = {0, 0, -50};
-float playerSpeed = 0;
 
 /** The currently selected option in the pilot menu */
 int8_t toggleableMenuOptSelection = 0;
@@ -801,14 +810,14 @@ void drawBackHud() {
     if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_DEBUG) {
         char* buf = aalloc(tickAllocator, 64);
 
-        writeFloat(buf, playerSpeed);
+        writeFloat(buf, player.speed);
         print(buf, 120, 10, 5, false, 1, false);
 
-        writeFloat(buf, playerPos.x);
+        writeFloat(buf, player.pos.x);
         print(buf, 80, 10, 5, false, 1, false);
-        writeFloat(buf, playerPos.y);
+        writeFloat(buf, player.pos.y);
         print(buf, 80, 20, 5, false, 1, false);
-        writeFloat(buf, playerPos.z);
+        writeFloat(buf, player.pos.z);
         print(buf, 80, 30, 5, false, 1, false);
 
         writeInt(buf, freeMemory());
@@ -1272,7 +1281,7 @@ typedef struct {
     float dz;
     Vec2 screenspacePos;
 } BodyVisualInfo;
-void initBodyVisualInfo(BodyVisualInfo *self, Vec3 bodyPos, Vec3 playerPos, Mtx33 invPlayerRot){
+void initBodyVisualInfo(BodyVisualInfo* self, Vec3 bodyPos, Vec3 playerPos, Mtx33 invPlayerRot){
     self->realPos = bodyPos;
     self->relPos = v3Sub(bodyPos, playerPos);
     self->visPos = mtx33MulVec(invPlayerRot, self->relPos);
@@ -1289,9 +1298,9 @@ typedef struct {
     Vec3 forward;
 } PlayerVisualInfo;
 void initPlayerVisualInfo(PlayerVisualInfo* self) {
-    self->rot = playerRot;
+    self->rot = player.rot;
     self->invRot = invUnscaled(self->rot);
-    self->forward = mtx33MulVec(playerRot, (Vec3){0, 0, 1});
+    self->forward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
 }
 
 /**
@@ -1302,9 +1311,9 @@ void initPlayerVisualInfo(PlayerVisualInfo* self) {
  */
 void drawOrbitLine(PlayerVisualInfo const * pvi, OrbitLine const * orbitLine) {
     if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_ORRERY) {
-        Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], playerPos));
+        Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], player.pos));
         for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
-            Vec3 thisVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[i], playerPos));
+            Vec3 thisVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[i], player.pos));
             if (thisVisPoint.z > 0 || lastVisPoint.z > 0) {
                 float ldz = HEIGHT/lastVisPoint.z;
                 if (ldz < 0) ldz *= -1000;
@@ -1386,7 +1395,7 @@ void draw() {
             if (body.type == INVALID) continue;
 
             BodyVisualInfo bvi;
-            initBodyVisualInfo(&bvi, body.position, playerPos, pvi.invRot);
+            initBodyVisualInfo(&bvi, body.position, player.pos, pvi.invRot);
             if (bvi.visPos.z > 0) {
                 deferredPOIs[nextDeferredPOIIndex] = (DeferredPOI) {
                     .show = true,
@@ -1469,34 +1478,34 @@ void TIC() {
         if (triggerableMenuOptSelection<0) triggerableMenuOptSelection = 0;
         if (triggerableMenuOptSelection>=TRIGGERABLE_MENU_OPTION_COUNT) triggerableMenuOptSelection = TRIGGERABLE_MENU_OPTION_COUNT-1;
     } else {
-        if (btn(0)) {playerRot = mtx33Mul(playerRot, rotX(-0.01)); screenShake.y -= 3;}
-        if (btn(1)) {playerRot = mtx33Mul(playerRot, rotX( 0.01)); screenShake.y += 3;}
-        if (btn(2)) {playerRot = mtx33Mul(playerRot, rotZ(-0.01));}
-        if (btn(3)) {playerRot = mtx33Mul(playerRot, rotZ( 0.01));}
+        if (btn(0)) {player.rot = mtx33Mul(player.rot, rotX(-0.01)); screenShake.y -= 3;}
+        if (btn(1)) {player.rot = mtx33Mul(player.rot, rotX( 0.01)); screenShake.y += 3;}
+        if (btn(2)) {player.rot = mtx33Mul(player.rot, rotZ(-0.01));}
+        if (btn(3)) {player.rot = mtx33Mul(player.rot, rotZ( 0.01));}
     }
 
-    Mtx33 const invPlayerRot = invUnscaled(playerRot);
-    Vec3 const playerForward = mtx33MulVec(playerRot, (Vec3){0, 0, 1});
+    Mtx33 const invPlayerRot = invUnscaled(player.rot);
+    Vec3 const playerForward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
 
     {
-        float oldPlayerSpeed = playerSpeed;
-        if (btn(4)) {playerSpeed += 0.1 * SECONDS_PER_FRAME;}
-        if (btn(5)) {playerSpeed -= 0.1 * SECONDS_PER_FRAME;}
+        float oldPlayerSpeed = player.speed;
+        if (btn(4)) {player.speed += 0.1 * SECONDS_PER_FRAME;}
+        if (btn(5)) {player.speed -= 0.1 * SECONDS_PER_FRAME;}
         if (enabledMenuOpts&TOGGLEABLE_MENU_OPTION_DAMPENERS && !btn(4) && !btn(5)) {
-            if (fabsf(playerSpeed) > 0.05 * SECONDS_PER_FRAME) {
-                if (playerSpeed<0) playerSpeed += 0.05 * SECONDS_PER_FRAME;
-                else playerSpeed -= 0.05 * SECONDS_PER_FRAME;
-                playerSpeed *= 0.99;
+            if (fabsf(player.speed) > 0.05 * SECONDS_PER_FRAME) {
+                if (player.speed<0) player.speed += 0.05 * SECONDS_PER_FRAME;
+                else player.speed -= 0.05 * SECONDS_PER_FRAME;
+                player.speed *= 0.99;
             } else {
-                playerSpeed = 0;
+                player.speed = 0;
             }
         }
 
-        screenShake.x += ((((int)time() * 118517) % 1024) / 512.0 - 1) * fminf(playerSpeed - oldPlayerSpeed, 0.05) * 100;
-        screenShake.y += ((((int)time() * 193141) % 1024) / 512.0 - 1) * fminf(playerSpeed - oldPlayerSpeed, 0.05) * 100;
+        screenShake.x += ((((int)time() * 118517) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
+        screenShake.y += ((((int)time() * 193141) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
     }
 
-    playerPos = v3Add(playerPos, v3Scale(playerForward, playerSpeed*SECONDS_PER_FRAME));
+    player.pos = v3Add(player.pos, v3Scale(playerForward, player.speed*SECONDS_PER_FRAME));
 
     cls(0);
     draw();
