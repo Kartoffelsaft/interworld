@@ -588,10 +588,12 @@ int writeInt(char* buf, int x) {
         return 1;
     }
 
+    bool negated = false;
     if (x < 0) {
         x *= -1;
         *buf = '-';
         buf++;
+        negated = true;
     }
 
     char* p;
@@ -602,7 +604,7 @@ int writeInt(char* buf, int x) {
     }
     *p = 0;
 
-    int ret = p-buf;
+    int ret = p-buf + (negated? 1:0);
 
     p--;
 
@@ -748,19 +750,60 @@ char* generateName(Allocator where) {
     return output;
 }
 
+typedef enum {
+    NONE = 0,
+    UNIQUE = 1,
+    WATER,
+} InventoryItemType;
+
+typedef struct {
+    char const * name;
+    float mass;
+} InventoryItemIntrinsics;
+
+typedef struct {
+    InventoryItemType type;
+    int32_t amount;
+} InventoryItemSlot;
+
+/**
+ * Get information about a particular item type
+ *
+ * @param type What item to look up
+ * @return information about that item. returns NULL for item types without known information
+ */
+InventoryItemIntrinsics const * getItemIntrinsics(InventoryItemType type) {
+    switch (type) {
+        case NONE: return NULL;
+        case UNIQUE: return NULL;
+
+        case WATER: {
+            static InventoryItemIntrinsics const water = (InventoryItemIntrinsics){
+                .name = "water",
+                .mass = 10.0,
+            };
+            return &water;
+        }
+
+        default: return NULL;
+    }
+}
+
+#define PLAYER_INVENTORY_SIZE 12
+
 typedef struct {
     Mtx33 rot;
     Vec3  pos;
     float speed;
+    InventoryItemSlot* inventory;
 } Player;
 
 Player player = (Player){
     .rot = MATRIX33_IDENTITY,
     .pos = {0, 0, -50},
     .speed = 0,
+    .inventory = NULL, // initialized in BOOT
 };
-
-// TODO: put into struct
 
 /** The currently selected option in the pilot menu */
 int8_t toggleableMenuOptSelection = 0;
@@ -783,6 +826,11 @@ int8_t triggerableMenuOptSelection = 0;
 #define TRIGGERABLE_MENU_OPTION_INVENTORY 0
 #define TRIGGERABLE_MENU_OPTION_MAP 1
 
+enum {
+    IN_WORLD,
+    IN_INVENTORY,
+} gameState;
+
 /**
  * Defines information about how and where to place markers on screen for
  * various objects. Deferred so that it gets drawn on top of other objects
@@ -802,42 +850,61 @@ DeferredPOI deferredPOIs[MAX_DEFERRED_POINTS_OF_INTEREST] = {0};
 Vec2 screenShake;
 
 /**
+ *
+ */
+void drawUIBox(int left, int right, int top, int bottom, uint8_t lightColor, uint8_t darkColor) {
+    line( left,    top,  left, bottom, lightColor);
+    line(right,    top, right, bottom, lightColor);
+    line( left,    top, right,    top, lightColor);
+    line( left, bottom, right, bottom, lightColor);
+
+    if (lightColor != darkColor) {
+        pix( left,    top, darkColor);
+        pix( left, bottom, darkColor);
+        pix(right, bottom, darkColor);
+        pix(right,    top, darkColor);
+    }
+}
+
+/**
  * Draw elements of the hud that appear behind the cockpit
  */
 void drawBackHud() {
     uint8_t transparentColor = 0;
 
-    if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_DEBUG) {
-        char* buf = aalloc(tickAllocator, 64);
+    if (gameState == IN_WORLD) {
+        if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_DEBUG) {
+            char* buf = aalloc(tickAllocator, 64);
 
-        writeFloat(buf, player.speed);
-        print(buf, 120, 10, 5, false, 1, false);
+            writeFloat(buf, player.speed);
+            print(buf, 120, 10, 5, false, 1, false);
 
-        writeFloat(buf, player.pos.x);
-        print(buf, 80, 10, 5, false, 1, false);
-        writeFloat(buf, player.pos.y);
-        print(buf, 80, 20, 5, false, 1, false);
-        writeFloat(buf, player.pos.z);
-        print(buf, 80, 30, 5, false, 1, false);
+            writeFloat(buf, player.pos.x);
+            print(buf, 80, 10, 5, false, 1, false);
+            writeFloat(buf, player.pos.y);
+            print(buf, 80, 20, 5, false, 1, false);
+            writeFloat(buf, player.pos.z);
+            print(buf, 80, 30, 5, false, 1, false);
 
-        writeInt(buf, freeMemory());
-        print(buf, 0, 0, 5, false, 1, false);
-        writeFloat(buf, 100.0 * freeMemory() / WASM_FREE_RAM_SIZE);
-        print(buf, 0, 10, 5, false, 1, false);
-    }
+            writeInt(buf, freeMemory());
+            print(buf, 0, 0, 5, false, 1, false);
+            writeFloat(buf, 100.0 * freeMemory() / WASM_FREE_RAM_SIZE);
+            print(buf, 0, 10, 5, false, 1, false);
+        }
 
-    for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) {
-        DeferredPOI dp = deferredPOIs[i];
-        if (dp.show) {
-            if (dp.selected) {
-                spr(260, dp.screenPos.x - 8, dp.screenPos.y - 8, &transparentColor, 1, 1, 0, 0, 2, 2);
-                line(dp.screenPos.x + 7, dp.screenPos.y, dp.screenPos.x + 16, dp.screenPos.y, 2);
-                line(dp.screenPos.x + 16, dp.screenPos.y, dp.screenPos.x + 20, dp.screenPos.y, 10);
-                if (dp.tag) print(dp.tag, dp.screenPos.x + 8, dp.screenPos.y + 2, 2, false, 1, true);
-            } else {
-                spr(274, dp.screenPos.x - 4, dp.screenPos.y - 4, &transparentColor, 1, 1, 0, 0, 1, 1);
-                line(dp.screenPos.x + 3, dp.screenPos.y, dp.screenPos.x + 5, dp.screenPos.y, 2);
-                line(dp.screenPos.x + 5, dp.screenPos.y, dp.screenPos.x + 7, dp.screenPos.y, 10);
+        for (int i = 0; i<MAX_DEFERRED_POINTS_OF_INTEREST; i++) {
+            DeferredPOI dp = deferredPOIs[i];
+            if (dp.show) {
+                if (dp.selected) {
+                    spr(260, dp.screenPos.x - 8, dp.screenPos.y - 8, &transparentColor, 1, 1, 0, 0, 2, 2);
+                    line(dp.screenPos.x + 7, dp.screenPos.y, dp.screenPos.x + 16, dp.screenPos.y, 2);
+                    line(dp.screenPos.x + 16, dp.screenPos.y, dp.screenPos.x + 20, dp.screenPos.y, 10);
+                    if (dp.tag) print(dp.tag, dp.screenPos.x + 8, dp.screenPos.y + 2, 2, false, 1, true);
+                } else {
+                    spr(274, dp.screenPos.x - 4, dp.screenPos.y - 4, &transparentColor, 1, 1, 0, 0, 1, 1);
+                    line(dp.screenPos.x + 3, dp.screenPos.y, dp.screenPos.x + 5, dp.screenPos.y, 2);
+                    line(dp.screenPos.x + 5, dp.screenPos.y, dp.screenPos.x + 7, dp.screenPos.y, 10);
+                }
             }
         }
     }
@@ -849,47 +916,66 @@ void drawBackHud() {
 void drawFrontHud() {
     uint8_t transparentColor = 0;
 
-    if (btn(7)) {
-        int const start = (WIDTH - 16*TOGGLEABLE_MENU_OPTION_COUNT)/2;
-        for (int i = 0; i<TOGGLEABLE_MENU_OPTION_COUNT; i++) {
-            spr(288+2*i, 
-                start + i*16 + 2*screenShake.x, 
-                20 + 2*screenShake.y, 
-                &transparentColor, 
-                1, 1, false, 0, 2, 2
-            );
-            if (enabledMenuOpts & (1<<i)) {
-                spr(258, 
-                    start + i*16 + 4 + 2*screenShake.x, 
-                    36 + 2*screenShake.y, 
+    if (gameState == IN_WORLD) {
+        if (btn(7)) {
+            int const start = (WIDTH - 16*TOGGLEABLE_MENU_OPTION_COUNT)/2;
+            for (int i = 0; i<TOGGLEABLE_MENU_OPTION_COUNT; i++) {
+                spr(288+2*i, 
+                    start + i*16 + 2*screenShake.x, 
+                    20 + 2*screenShake.y, 
                     &transparentColor, 
-                    1, 1, false, 0, 1, 1
+                    1, 1, false, 0, 2, 2
+                );
+                if (enabledMenuOpts & (1<<i)) {
+                    spr(258, 
+                        start + i*16 + 4 + 2*screenShake.x, 
+                        36 + 2*screenShake.y, 
+                        &transparentColor, 
+                        1, 1, false, 0, 1, 1
+                    );
+                }
+            }
+
+            spr(256, start + toggleableMenuOptSelection*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
+
+        } else if (btn(6)) {
+            int const start = (WIDTH - 16*TRIGGERABLE_MENU_OPTION_COUNT)/2;
+            for (int i = 0; i < TRIGGERABLE_MENU_OPTION_COUNT; i++) {
+                spr(320+2*i, 
+                    start + i*16 + 2*screenShake.x, 
+                    20 + 2*screenShake.y, 
+                    &transparentColor, 
+                    1, 1, false, 0, 2, 2
                 );
             }
-        }
 
-        spr(256, start + toggleableMenuOptSelection*16 + 2*screenShake.x, 20 + 2*screenShake.y, &transparentColor, 1, 1, false, 0, 2, 2);
-
-    } else if (btn(6)) {
-        int const start = (WIDTH - 16*TRIGGERABLE_MENU_OPTION_COUNT)/2;
-        for (int i = 0; i < TRIGGERABLE_MENU_OPTION_COUNT; i++) {
-            spr(320+2*i, 
-                start + i*16 + 2*screenShake.x, 
+            spr(256, 
+                start + triggerableMenuOptSelection*16 + 2*screenShake.x, 
                 20 + 2*screenShake.y, 
                 &transparentColor, 
                 1, 1, false, 0, 2, 2
             );
         }
 
-        spr(256, 
-            start + triggerableMenuOptSelection*16 + 2*screenShake.x, 
-            20 + 2*screenShake.y, 
-            &transparentColor, 
-            1, 1, false, 0, 2, 2
-        );
-    }
+        pix(WIDTH/2, HEIGHT/2, 3);
 
-    pix(WIDTH/2, HEIGHT/2, 3);
+    } else if (gameState == IN_INVENTORY) {
+        drawUIBox(50, WIDTH-50, 10, HEIGHT-40, 10, 2);
+        drawUIBox(52, 110, 40, HEIGHT-42, 2, 3);
+        drawUIBox(112, WIDTH-52, 12, HEIGHT-42, 2, 3);
+
+        print("[Ship stats]", 54, 42, 10, false, 1, true);
+
+        for (size_t i = 0; i < PLAYER_INVENTORY_SIZE; i++) {
+            InventoryItemIntrinsics const * iii = getItemIntrinsics(player.inventory[i].type);
+            if (iii == NULL) continue;
+
+            char* buf = aalloc(tickAllocator, 16); // TODO: make into to string that implicitly does it this way
+            writeInt(buf, player.inventory[i].amount);
+            print(buf, 114, 14 + 7*i, 10, false, 1, true);
+            print(iii->name, 124, 14 + 7*i, 10, false, 1, true);
+        }
+    }
 }
 
 typedef struct {
@@ -928,17 +1014,19 @@ void drawCockpit() {
 
     TrianglePoint pts[] = (TrianglePoint[]) {
         {     -10, 20       },// 0
-        {     100, HEIGHT   },// 1
+        {      50, HEIGHT   },// 1
         {     -10, 30       },// 2
-        {      90, HEIGHT   },// 3
+        {      40, HEIGHT   },// 3
         {WIDTH+10, 20       },// 4
-        {     140, HEIGHT   },// 5
+        {WIDTH-50, HEIGHT   },// 5
         {WIDTH+10, 30       },// 6
-        {     150, HEIGHT   },// 7
-        {      80, HEIGHT-20},// 8
-        {WIDTH-80, HEIGHT-20},// 9
+        {WIDTH-40, HEIGHT   },// 7
+        {      40, HEIGHT-20},// 8
+        {WIDTH-40, HEIGHT-20},// 9
         {     -10, HEIGHT+10},//10
         {WIDTH+10, HEIGHT+10},//11
+        {      60, HEIGHT-25},//12
+        {WIDTH-60, HEIGHT-25},//13
     };
 
     Triangle tris[] = (Triangle[]) {
@@ -948,9 +1036,11 @@ void drawCockpit() {
         {{ 5,  7,  6}, 9},
         {{ 8,  9, 10}, 1},
         {{ 9, 11, 10}, 1},
+        {{ 9, 13, 12}, 1},
+        {{ 8,  9, 12}, 1},
     };
 
-    drawTriangles(tris, 6, pts, screenShake);
+    drawTriangles(tris, 8, pts, screenShake);
 }
 
 uint64_t frame = 0;
@@ -1419,11 +1509,64 @@ void draw() {
 void triggerCurrentSelection() {
     switch (triggerableMenuOptSelection) {
         case TRIGGERABLE_MENU_OPTION_INVENTORY:
+            gameState = IN_INVENTORY;
             break;
         case TRIGGERABLE_MENU_OPTION_MAP:
             break;
         default:
             break;
+    }
+}
+
+void processInput() {
+    switch (gameState) {
+    case IN_WORLD:
+        if (btn(7)) {
+            if (btn(0)) {enabledMenuOpts |= 1 << toggleableMenuOptSelection;}
+            if (btn(1)) {enabledMenuOpts &= ~(1 << toggleableMenuOptSelection);}
+            if (btn(2) && !(lastButtonInputs&4)) {toggleableMenuOptSelection--;}
+            if (btn(3) && !(lastButtonInputs&8)) {toggleableMenuOptSelection++;}
+            if (toggleableMenuOptSelection<0) toggleableMenuOptSelection = 0;
+            if (toggleableMenuOptSelection>=TOGGLEABLE_MENU_OPTION_COUNT) toggleableMenuOptSelection = TOGGLEABLE_MENU_OPTION_COUNT-1;
+        } else if (btn(6)) {
+            if (btn(0) && !(lastButtonInputs&1)) {triggerCurrentSelection();}
+            if (btn(2) && !(lastButtonInputs&4)) {triggerableMenuOptSelection--;}
+            if (btn(3) && !(lastButtonInputs&8)) {triggerableMenuOptSelection++;}
+            if (triggerableMenuOptSelection<0) triggerableMenuOptSelection = 0;
+            if (triggerableMenuOptSelection>=TRIGGERABLE_MENU_OPTION_COUNT) triggerableMenuOptSelection = TRIGGERABLE_MENU_OPTION_COUNT-1;
+        } else {
+            if (btn(0)) {player.rot = mtx33Mul(player.rot, rotX(-0.01)); screenShake.y -= 3;}
+            if (btn(1)) {player.rot = mtx33Mul(player.rot, rotX( 0.01)); screenShake.y += 3;}
+            if (btn(2)) {player.rot = mtx33Mul(player.rot, rotZ(-0.01));}
+            if (btn(3)) {player.rot = mtx33Mul(player.rot, rotZ( 0.01));}
+        }
+
+        {
+            float oldPlayerSpeed = player.speed;
+            if (btn(4)) {player.speed += 0.1 * SECONDS_PER_FRAME;}
+            if (btn(5)) {player.speed -= 0.1 * SECONDS_PER_FRAME;}
+            if (enabledMenuOpts&TOGGLEABLE_MENU_OPTION_DAMPENERS && !btn(4) && !btn(5)) {
+                if (fabsf(player.speed) > 0.05 * SECONDS_PER_FRAME) {
+                    if (player.speed<0) player.speed += 0.05 * SECONDS_PER_FRAME;
+                    else player.speed -= 0.05 * SECONDS_PER_FRAME;
+                    player.speed *= 0.99;
+                } else {
+                    player.speed = 0;
+                }
+            }
+
+            screenShake.x += ((((int)time() * 118517) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
+            screenShake.y += ((((int)time() * 193141) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
+        }
+        break;
+
+    case IN_INVENTORY:
+        if (btn(5)) {
+            gameState = IN_WORLD;
+            break;
+        }
+
+        break;
     }
 }
 
@@ -1458,54 +1601,27 @@ void BOOT() {
     celestialBodies[4] = generatePlanet();
     celestialBodies[5] = generatePlanet();
     celestialBodies[6] = generatePlanet();
+
+    player.inventory = aalloc(persistAllocator, sizeof(InventoryItemSlot) * PLAYER_INVENTORY_SIZE);
+    // for testing
+    player.inventory[3] = (InventoryItemSlot){
+        .type = WATER,
+        .amount = 10,
+    };
 }
 
 WASM_EXPORT("TIC")
 void TIC() {
     screenShake = v2Scale(screenShake, 0.5);
 
-    if (btn(7)) {
-        if (btn(0)) {enabledMenuOpts |= 1 << toggleableMenuOptSelection;}
-        if (btn(1)) {enabledMenuOpts &= ~(1 << toggleableMenuOptSelection);}
-        if (btn(2) && !(lastButtonInputs&4)) {toggleableMenuOptSelection--;}
-        if (btn(3) && !(lastButtonInputs&8)) {toggleableMenuOptSelection++;}
-        if (toggleableMenuOptSelection<0) toggleableMenuOptSelection = 0;
-        if (toggleableMenuOptSelection>=TOGGLEABLE_MENU_OPTION_COUNT) toggleableMenuOptSelection = TOGGLEABLE_MENU_OPTION_COUNT-1;
-    } else if (btn(6)) {
-        if (btn(0) && !(lastButtonInputs&1)) {triggerCurrentSelection();}
-        if (btn(2) && !(lastButtonInputs&4)) {triggerableMenuOptSelection--;}
-        if (btn(3) && !(lastButtonInputs&8)) {triggerableMenuOptSelection++;}
-        if (triggerableMenuOptSelection<0) triggerableMenuOptSelection = 0;
-        if (triggerableMenuOptSelection>=TRIGGERABLE_MENU_OPTION_COUNT) triggerableMenuOptSelection = TRIGGERABLE_MENU_OPTION_COUNT-1;
-    } else {
-        if (btn(0)) {player.rot = mtx33Mul(player.rot, rotX(-0.01)); screenShake.y -= 3;}
-        if (btn(1)) {player.rot = mtx33Mul(player.rot, rotX( 0.01)); screenShake.y += 3;}
-        if (btn(2)) {player.rot = mtx33Mul(player.rot, rotZ(-0.01));}
-        if (btn(3)) {player.rot = mtx33Mul(player.rot, rotZ( 0.01));}
+    processInput();
+
+    if (gameState == IN_WORLD) {
+        Mtx33 const invPlayerRot = invUnscaled(player.rot);
+        Vec3 const playerForward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
+
+        player.pos = v3Add(player.pos, v3Scale(playerForward, player.speed*SECONDS_PER_FRAME));
     }
-
-    Mtx33 const invPlayerRot = invUnscaled(player.rot);
-    Vec3 const playerForward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
-
-    {
-        float oldPlayerSpeed = player.speed;
-        if (btn(4)) {player.speed += 0.1 * SECONDS_PER_FRAME;}
-        if (btn(5)) {player.speed -= 0.1 * SECONDS_PER_FRAME;}
-        if (enabledMenuOpts&TOGGLEABLE_MENU_OPTION_DAMPENERS && !btn(4) && !btn(5)) {
-            if (fabsf(player.speed) > 0.05 * SECONDS_PER_FRAME) {
-                if (player.speed<0) player.speed += 0.05 * SECONDS_PER_FRAME;
-                else player.speed -= 0.05 * SECONDS_PER_FRAME;
-                player.speed *= 0.99;
-            } else {
-                player.speed = 0;
-            }
-        }
-
-        screenShake.x += ((((int)time() * 118517) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
-        screenShake.y += ((((int)time() * 193141) % 1024) / 512.0 - 1) * fminf(player.speed - oldPlayerSpeed, 0.05) * 100;
-    }
-
-    player.pos = v3Add(player.pos, v3Scale(playerForward, player.speed*SECONDS_PER_FRAME));
 
     cls(0);
     draw();
