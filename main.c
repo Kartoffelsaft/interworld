@@ -8,6 +8,14 @@
 #include <stdlib.h>
 #endif
 #endif
+
+#define IWC_MEM_IMPLEMENTATION
+#define IWC_NO_C_ALLOCATOR_WRAPPER
+#define IWC_WARN(s) trace(s, 1)
+#include "iwclib/iwc_mem.h"
+#define IWC_MATH_IMPLEMENTATION
+#include "iwclib/iwc_math.h"
+
 #include <math.h>
 #include <stddef.h>
 
@@ -38,99 +46,6 @@ void traceNum(int n) {
     trace(buf, 1);
 }
 
-/**
- * Specifies which memory operation to do
- * @see MemFn
- * @see Allocator
- */
-typedef enum {
-    ALLOC,
-    FREE,
-    REALLOC,
-    EMPTY,
-} MemOperator;
-
-/**
- * Function pointer for a particular allocator
- * @param info Arbitrary internal data for the allocator
- * @param operation Which memory operation is expected
- * @param ptr In/Out reference to the pointer to act on
- * @param oldSize The size of memory currently pointed at by *ptr
- * @param newSize The expected size of memory pointed at by *ptr after calling
- * @see MemOperator
- * @see Allocator
- */
-typedef void (*MemFn)(void* info, MemOperator operation, void** ptr, size_t oldSize, size_t newSize);
-
-/**
- * Abstract struct for any allocator implementation
- * @see MemOperator
- * @see MemFn
- */
-typedef struct {
-    /**
-     * Function that defines how this allocator manages memory
-     *
-     * @see bufferAllocOp for an example
-     *
-     * @see MemFn
-     */
-    MemFn operate;
-
-    /**
-     * Arbitrary data for a given allocator, passed with every allocation
-     * operation for this allocator
-     *
-     * @see BufferAllocInfo for an example
-     */
-    void* info;
-} Allocator;
-
-/**
- * Abstracted memory allocation operation
- *
- * @param a Which allocator to retrieve the memory from
- * @param amount Number of bytes to retrieve
- * @return pointer to the allocated memory
- */
-void* aalloc(Allocator a, size_t amount) {
-    void* ret = NULL;
-    a.operate(a.info, ALLOC, &ret, 0, amount);
-    return ret;
-}
-/**
- * Abstracted memory free operation
- *
- * @param a Which allocator the memory came from
- * @param what Pointer to the memory to free
- * @param amount Size of the memory getting freed
- */
-void afree(Allocator a, void* what, size_t amount) {
-    a.operate(a.info, FREE, &what, amount, 0);
-}
-/**
- * Abstracted memory reallocation operation
- *
- * @param a Which allocator the memory came from
- * @param what In/Out reference to pointer that will have data resized
- * @param oldSize Current size of the memory pointed to by *ptr
- * @param newSize Desired size of the memory pointed to by *ptr
- */
-void arealloc(Allocator a, void** what, size_t oldSize, size_t newSize) {
-    a.operate(a.info, REALLOC, what, oldSize, newSize);
-}
-/**
- * Abstracted memory empty operation
- *
- * This frees all of the data of a particular allocator, invalidating all
- * pointers allocated by it. @see afree for freeing just a single pointer
- *
- * @param a Allocator to empty
- */
-void aempty(Allocator a) {
-    a.operate(a.info, EMPTY, NULL, 0, 0);
-}
-
 // Included because certain c stdlib stuff won't get linked for whatever reason
 void* memcpy(void* restrict dest, void const * restrict src, size_t n) {
     for (int i = 0; i < n; i++) *(uint8_t*)(dest++) = *(uint8_t*)(src++);
@@ -141,88 +56,6 @@ size_t strlen(char const * s) {
     size_t n = 0;
     while(*(s++)) n++;
     return n;
-}
-
-/**
- * Move memory from one allocator to another
- *
- * @param oldPtr reference to the pointer to move
- * @param size Number of bytes pointed to by *oldPtr
- * @param from The allocator *oldPtr is currently pointing to
- * @param to The allocator to move the memory to
- */
-void changeAllocator(void** oldPtr, size_t size, Allocator from, Allocator to) {
-    void* newPtr = aalloc(to, size);
-    memcpy(newPtr, *oldPtr, size);
-    afree(from, *oldPtr, size);
-    *oldPtr = newPtr;
-}
-
-typedef struct {
-    void* head;
-    void* buf;
-    size_t bufsize;
-} BufferAllocInfo;
-
-/**
- * Buffer allocator implementation
- *
- * SUPPORTS:
- * - ALLOC
- * - FREE (only for last alloc)
- * - REALLOC (only for last alloc)
- * - EMPTY
- */
-void bufferAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
-    BufferAllocInfo* a = info;
-    size_t osAligned = ((oldSize-1)/8 + 1)*8;
-    size_t nsAligned = ((newSize-1)/8 + 1)*8;
-
-    switch (op) {
-        case ALLOC:
-            if (a->head + nsAligned > a->buf + a->bufsize) {
-                *ptr = NULL;
-            } else {
-                *ptr = a->head;
-                a->head += nsAligned;
-            }
-            break;
-        case FREE:
-            a->head = *ptr;
-            break;
-        case REALLOC:
-            if (*ptr + osAligned == a->head) {
-                // TODO: doesn't check if there's enough space but I am lazy right now
-                a->head = *ptr + nsAligned;
-            } else {
-                trace("WARNING: tick allocator can only realloc last alloc", 1);
-            }
-            break;
-        case EMPTY:
-            a->head = a->buf;
-            break;
-    }
-}
-
-/**
- * Create a buffer allocator, using another allocator as a backing
- *
- * @param out Where to put the buffer allocator
- * @param from Where the memory for the buffer allocator comes from
- * @param size The maximum data to be managed by the buffer allocator
- */
-void initBufferAllocator(Allocator* out, Allocator from, size_t size) {
-    BufferAllocInfo* bai = aalloc(from, sizeof(BufferAllocInfo));
-
-    *bai = (BufferAllocInfo){0};
-    bai->buf = aalloc(from, size);
-    bai->head = bai->buf;
-    bai->bufsize = size;
-
-    *out = (Allocator){
-        .info = bai,
-        .operate = bufferAllocOp,
-    };
 }
 
 struct PairTickAllocInfo_s;
@@ -238,66 +71,80 @@ typedef struct PairPersistAllocInfo_s {
     struct PairTickAllocInfo_s* other;
 } PairPersistAllocInfo;
 
-void pairTickAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
+bool pairTickAllocOp(void* info, iwc_MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
     PairTickAllocInfo* a = info;
     size_t osAligned = ((oldSize-1)/8 + 1)*8;
     size_t nsAligned = ((newSize-1)/8 + 1)*8;
 
     switch (op) {
-        case ALLOC:
+        case IWC_ALLOC:
             if (a->head + nsAligned > a->other->head) {
                 *ptr = NULL;
+                return false;
             } else {
                 *ptr = a->head;
                 a->head += nsAligned;
+                return true;
             }
             break;
-        case FREE:
+        case IWC_FREE:
             a->head = *ptr;
+            return true;
             break;
-        case REALLOC:
+        case IWC_REALLOC:
             if (*ptr + osAligned == a->head) {
                 // TODO: doesn't check if there's enough space but I am lazy right now
                 a->head = *ptr + nsAligned;
+                return true;
             } else {
                 trace("WARNING: tick allocator can only realloc last alloc", 1);
+                return false;
             }
             break;
-        case EMPTY:
+        case IWC_EMPTY:
             a->head = a->start;
+            return true;
             break;
     }
+
+    return false;
 }
 
-void pairPersistAllocOp(void* info, MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
+bool pairPersistAllocOp(void* info, iwc_MemOperator op, void** ptr, size_t oldSize, size_t newSize) {
     PairTickAllocInfo* a = info;
     size_t osAligned = ((oldSize-1)/8 + 1)*8;
     size_t nsAligned = ((newSize-1)/8 + 1)*8;
 
     switch (op) {
-        case ALLOC:
+        case IWC_ALLOC:
             if (a->head - nsAligned < a->other->head) {
                 *ptr = NULL;
+                return false;
             } else {
                 a->head -= nsAligned;
                 *ptr = a->head;
+                return true;
             }
             break;
-        case FREE:
+        case IWC_FREE:
             // TODO: need some info on the mem size to properly do this
             break;
-        case REALLOC:
+        case IWC_REALLOC:
             trace("WARNING: persist allocator doesn't implement realloc", 1);
+            return false;
             break;
-        case EMPTY:
+        case IWC_EMPTY:
             a->head = a->start;
+            return true;
     }
+
+    return false;
 }
 
 /**
  * Set up the tick and persist allocators using the memory given by the TIC-80
  */
-void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
+void initAllocators(iwc_Allocator* tickAllocator, iwc_Allocator* persistAllocator) {
     // add some amount to avoid .rodata and .data sections
     // TODO: somehow figure that out automatically
     void* startOfUsableMemory = WASM_FREE_RAM + 0x1000;
@@ -326,19 +173,19 @@ void initAllocators(Allocator* tickAllocator, Allocator* persistAllocator) {
  * @see PairTickAllocInfo
  * @see pairTickAllocOp
  */
-Allocator tickAllocator;
+iwc_Allocator tickAllocator;
 /**
  * Allocator for memory kept between frames.
  *
  * @see PairPersistAllocInfo
  * @see pairPersistAllocOp
  */
-Allocator persistAllocator;
+iwc_Allocator persistAllocator;
 
 /**
  * Allocator for the current system the player is in
  */
-Allocator currentSystemAllocator;
+iwc_Allocator currentSystemAllocator;
 
 /**
  * @return the amount of memory free between the tick and persist allocators
@@ -356,158 +203,6 @@ uint32_t rands(uint64_t iseed) {
     return seed >> 2;
 }
 
-typedef struct {
-    float x, y;
-} Vec2;
-typedef struct {
-    float x, y, z;
-} Vec3;
-typedef struct {
-    float aa, ab, ba, bb;
-} Mtx22;
-typedef struct {
-    float aa,ab,ac,ba,bb,bc,ca,cb,cc;
-} Mtx33;
-
-Vec2 v2Sub(Vec2 lhs, Vec2 rhs) {
-    return (Vec2){
-        lhs.x - rhs.x,
-        lhs.y - rhs.y,
-    };
-}
-Vec2 v2Add(Vec2 lhs, Vec2 rhs) {
-    return (Vec2){
-        lhs.x + rhs.x,
-        lhs.y + rhs.y,
-    };
-}
-Vec2 v2Scale(Vec2 v, float amount) {
-    return (Vec2){v.x * amount, v.y * amount};
-}
-float v2LenSqr(Vec2 v) {
-    return v.x*v.x + v.y*v.y;
-}
-float v2Len(Vec2 v) {
-    return sqrtf(v2LenSqr(v));
-}
-Vec2 v2Norm(Vec2 v) {
-    return v2Scale(v, 1/v2Len(v));
-}
-Vec3 v3Sub(Vec3 lhs, Vec3 rhs) {
-    return (Vec3){
-        lhs.x - rhs.x,
-        lhs.y - rhs.y,
-        lhs.z - rhs.z,
-    };
-}
-Vec3 v3Add(Vec3 lhs, Vec3 rhs) {
-    return (Vec3){
-        lhs.x + rhs.x,
-        lhs.y + rhs.y,
-        lhs.z + rhs.z,
-    };
-}
-Vec3 v3Scale(Vec3 v, float amount) {
-    return (Vec3){v.x * amount, v.y * amount, v.z * amount};
-}
-Vec3 v3Cross(Vec3 lhs, Vec3 rhs) {
-    return (Vec3){
-        lhs.y * rhs.z,
-        lhs.x * rhs.z,
-        lhs.x * rhs.y,
-    };
-}
-float v3LenSqr(Vec3 v) {
-    return v.x*v.x + v.y*v.y + v.z*v.z;
-}
-float v3Len(Vec3 v) {
-    return sqrtf(v3LenSqr(v));
-}
-Vec3 v3Norm(Vec3 v) {
-    return v3Scale(v, 1/v3Len(v));
-}
-
-Vec3 mtx33MulVec(Mtx33 mtx, Vec3 v) {
-    return (Vec3){
-        .x = mtx.aa*v.x + mtx.ab*v.y + mtx.ac*v.z,
-        .y = mtx.ba*v.x + mtx.bb*v.y + mtx.bc*v.z,
-        .z = mtx.ca*v.x + mtx.cb*v.y + mtx.cc*v.z,
-    };
-}
-Mtx33 mtx33Mul(Mtx33 lhs, Mtx33 rhs) {
-    return (Mtx33){
-        lhs.aa*rhs.aa + lhs.ab*rhs.ba + lhs.ac*rhs.ca, lhs.aa*rhs.ab + lhs.ab*rhs.bb + lhs.ac*rhs.cb, lhs.aa*rhs.ac + lhs.ab*rhs.bc + lhs.ac*rhs.cc,
-        lhs.ba*rhs.aa + lhs.bb*rhs.ba + lhs.bc*rhs.ca, lhs.ba*rhs.ab + lhs.bb*rhs.bb + lhs.bc*rhs.cb, lhs.ba*rhs.ac + lhs.bb*rhs.bc + lhs.bc*rhs.cc,
-        lhs.ca*rhs.aa + lhs.cb*rhs.ba + lhs.cc*rhs.ca, lhs.ca*rhs.ab + lhs.cb*rhs.bb + lhs.cc*rhs.cb, lhs.ca*rhs.ac + lhs.cb*rhs.bc + lhs.cc*rhs.cc,
-    };
-}
-
-/**
- * Inverts a 3x3 matrix, but without scaling by the determinant. Useful if you
- * know the determinant of your matrix is 1
- */
-Mtx33 invUnscaled(Mtx33 mtx) {
-    return (Mtx33){
-        mtx.bb*mtx.cc - mtx.bc*mtx.cb, mtx.ac*mtx.cb - mtx.ab*mtx.cc, mtx.ab*mtx.bc - mtx.ac*mtx.bb,
-        mtx.bc*mtx.ca - mtx.ba*mtx.cc, mtx.aa*mtx.cc - mtx.ac*mtx.ca, mtx.ac*mtx.ba - mtx.aa*mtx.bc,
-        mtx.ba*mtx.cb - mtx.bb*mtx.ca, mtx.ab*mtx.ca - mtx.aa*mtx.cb, mtx.aa*mtx.bb - mtx.ba*mtx.ab,
-    };
-}
-
-Mtx33 mtx33LookAt(Vec3 v) {
-    Vec3 zax = v3Norm(v);
-    Vec3 xax = v3Norm(v3Cross(v, (Vec3){0, 1, 0}));
-    Vec3 yax = v3Cross(zax, xax);
-    return (Mtx33){
-        xax.x, yax.x, zax.x,
-        xax.y, yax.y, zax.y,
-        xax.z, yax.z, zax.z,
-    };
-}
-
-Vec2 mtx22MulVec(Mtx22 mtx, Vec2 v) {
-    return (Vec2){
-        mtx.aa*v.x + mtx.ab*v.y,
-        mtx.ba*v.x + mtx.bb*v.y,
-    };
-}
-
-Mtx22 mtx22Mul(Mtx22 lhs, Mtx22 rhs) {
-    return (Mtx22){
-        lhs.aa*rhs.aa + lhs.ab*rhs.ba, lhs.aa*rhs.ab + lhs.ab*rhs.bb,
-        lhs.ba*rhs.aa + lhs.bb*rhs.ba, lhs.ba*rhs.ab + lhs.bb*rhs.bb,
-    };
-}
-
-
-Mtx33 rotX(float theta) {
-    float s = sinf(theta);
-    float c = cosf(theta);
-    return (Mtx33) {
-        1, 0, 0,
-        0, c,-s,
-        0, s, c,
-    };
-}
-Mtx33 rotY(float theta) {
-    float s = sinf(theta);
-    float c = cosf(theta);
-    return (Mtx33) {
-        c, 0, s,
-        0, 1, 0,
-       -s, 0, c,
-    };
-}
-Mtx33 rotZ(float theta) {
-    float s = sinf(theta);
-    float c = cosf(theta);
-    return (Mtx33) {
-        c,-s, 0,
-        s, c, 0,
-        0, 0, 1,
-    };
-}
-
 /**
  * Approximate sin, included because for some reason -lm isn't working
  */
@@ -520,10 +215,10 @@ float cosfa(float);
 /**
  * 3x3 matrix to rotate around X, approximate
  */
-Mtx33 rotXA(float theta) {
+iwc_Mtx33 rotXA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
-    return (Mtx33) {
+    return (iwc_Mtx33) {
         1, 0, 0,
         0, c,-s,
         0, s, c,
@@ -532,10 +227,10 @@ Mtx33 rotXA(float theta) {
 /**
  * 3x3 matrix to rotate around Y, approximate
  */
-Mtx33 rotYA(float theta) {
+iwc_Mtx33 rotYA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
-    return (Mtx33) {
+    return (iwc_Mtx33) {
         c, 0, s,
         0, 1, 0,
        -s, 0, c,
@@ -544,21 +239,15 @@ Mtx33 rotYA(float theta) {
 /**
  * 3x3 matrix to rotate around Z, approximate
  */
-Mtx33 rotZA(float theta) {
+iwc_Mtx33 rotZA(float theta) {
     float s = sinfa(theta);
     float c = cosfa(theta);
-    return (Mtx33) {
+    return (iwc_Mtx33) {
         c,-s, 0,
         s, c, 0,
         0, 0, 1,
     };
 }
-
-#define MATRIX33_IDENTITY (Mtx33){\
-        1, 0, 0,\
-        0, 1, 0,\
-        0, 0, 1,\
-    }
 
 /// https://stackoverflow.com/questions/3380628/fast-arc-cos-algorithm/26030435#26030435
 float acosf(float x) {
@@ -667,7 +356,7 @@ void stringAppend(char** str, char* appicand) {
 
     size_t sl = strlen(*str);
 
-    arealloc(tickAllocator, (void**)str, sl+1, sl+al+1);
+    iwc_realloc(tickAllocator, (void**)str, sl+1, sl+al+1);
 
     for (int i = 0; i < al; i++) {
         (*str)[sl+i] = appicand[i];
@@ -681,8 +370,8 @@ void stringAppend(char** str, char* appicand) {
  * @param where Where the return string will be placed
  * @return The generated name
  */
-char* generateName(Allocator where) {
-    char* output = aalloc(tickAllocator, 1);
+char* generateName(iwc_Allocator where) {
+    char* output = iwc_alloc(tickAllocator, 1);
     if (output == NULL) return NULL;
     *output = '\0';
 
@@ -745,7 +434,7 @@ char* generateName(Allocator where) {
     }
 
     if (where.info != tickAllocator.info) {
-        changeAllocator((void**)&output, strlen(output)+1, tickAllocator, where);
+        iwc_changeAllocator((void**)&output, strlen(output)+1, tickAllocator, where);
     }
     return output;
 }
@@ -792,14 +481,14 @@ InventoryItemIntrinsics const * getItemIntrinsics(InventoryItemType type) {
 #define PLAYER_INVENTORY_SIZE 12
 
 typedef struct {
-    Mtx33 rot;
-    Vec3  pos;
+    iwc_Mtx33 rot;
+    iwc_Vec3  pos;
     float speed;
     InventoryItemSlot* inventory;
 } Player;
 
 Player player = (Player){
-    .rot = MATRIX33_IDENTITY,
+    .rot = IWC_MAT33_IDENTITY,
     .pos = {0, 0, -50},
     .speed = 0,
     .inventory = NULL, // initialized in BOOT
@@ -836,7 +525,7 @@ enum {
  * various objects. Deferred so that it gets drawn on top of other objects
  */
 typedef struct {
-    Vec2 screenPos; /** where on screen the center of the sprite is, in terms of pixels */
+    iwc_Vec2 screenPos; /** where on screen the center of the sprite is, in terms of pixels */
     char const * tag; /** label to show when selected. Nullable */
     bool show:1; /** whether to draw this. you probably want to enable this */
     bool selected:1; /** whether the player has this POI node focused */
@@ -847,7 +536,7 @@ typedef struct {
 DeferredPOI deferredPOIs[MAX_DEFERRED_POINTS_OF_INTEREST] = {0};
 
 /** Offset of the cockpit on screen */
-Vec2 screenShake;
+iwc_Vec2 screenShake;
 
 /**
  *
@@ -874,7 +563,7 @@ void drawBackHud() {
 
     if (gameState == IN_WORLD) {
         if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_DEBUG) {
-            char* buf = aalloc(tickAllocator, 64);
+            char* buf = iwc_alloc(tickAllocator, 64);
 
             writeFloat(buf, player.speed);
             print(buf, 120, 10, 5, false, 1, false);
@@ -970,7 +659,7 @@ void drawFrontHud() {
             InventoryItemIntrinsics const * iii = getItemIntrinsics(player.inventory[i].type);
             if (iii == NULL) continue;
 
-            char* buf = aalloc(tickAllocator, 16); // TODO: make into to string that implicitly does it this way
+            char* buf = iwc_alloc(tickAllocator, 16); // TODO: make into to string that implicitly does it this way
             writeInt(buf, player.inventory[i].amount);
             print(buf, 114, 14 + 7*i, 10, false, 1, true);
             print(iii->name, 124, 14 + 7*i, 10, false, 1, true);
@@ -996,7 +685,7 @@ typedef struct {
  * @param pts Array of points indexed by tris
  * @param offset shift of triangles on screen
  */
-void drawTriangles(Triangle const * tris, size_t nTris, TrianglePoint const * pts, Vec2 offset) {
+void drawTriangles(Triangle const * tris, size_t nTris, TrianglePoint const * pts, iwc_Vec2 offset) {
     for (int i = 0; i < nTris; i++) {
         Triangle const * t = &tris[i];
         tri(
@@ -1047,7 +736,7 @@ uint64_t frame = 0;
 
 #define SKYBOX_STAR_COUNT 64
 /** Random distant points in 3d space to mimic stars */
-Vec3 skyboxStars[SKYBOX_STAR_COUNT];
+iwc_Vec3 skyboxStars[SKYBOX_STAR_COUNT];
 
 #define ORBIT_LINE_RESOLUTION 20
 /**
@@ -1055,7 +744,7 @@ Vec3 skyboxStars[SKYBOX_STAR_COUNT];
  * Used for the orrery. @see TOGGLEABLE_MENU_OPTION_ORRERY
  */
 typedef struct{
-    Vec3 points[ORBIT_LINE_RESOLUTION];
+    iwc_Vec3 points[ORBIT_LINE_RESOLUTION];
 } OrbitLine;
 
 /**
@@ -1065,17 +754,17 @@ typedef struct{
  * @param position Where the object is
  * @return The generated orbit line
  */
-OrbitLine* generateOrbitLine(Vec3 parent, Vec3 position) {
-    OrbitLine* ret = aalloc(currentSystemAllocator, sizeof(OrbitLine));
-    Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
+OrbitLine* generateOrbitLine(iwc_Vec3 parent, iwc_Vec3 position) {
+    OrbitLine* ret = iwc_alloc(currentSystemAllocator, sizeof(OrbitLine));
+    iwc_Mtx33 nextPointMtx = rotY(PI / ORBIT_LINE_RESOLUTION * 2);
 
-    ret->points[0] = v3Sub(position, parent);
+    ret->points[0] = iwc_v3Sub(position, parent);
     for (int i = 1; i < ORBIT_LINE_RESOLUTION; i++) {
-        ret->points[i] = mtx33MulVec(nextPointMtx, ret->points[i-1]);
+        ret->points[i] = iwc_mtx33MulVec(nextPointMtx, ret->points[i-1]);
     }
 
     for (int i = 0; i < ORBIT_LINE_RESOLUTION; i++) {
-        ret->points[i] = v3Add(ret->points[i], parent);
+        ret->points[i] = iwc_v3Add(ret->points[i], parent);
     }
 
     return ret;
@@ -1110,7 +799,7 @@ typedef struct {
         STAR,
         PLANET,
     } type;
-    Vec3 position;
+    iwc_Vec3 position;
     char* tag; /** @see DeferredPOI */
     union {
         Star star;
@@ -1131,10 +820,10 @@ CelestialBody generatePlanet() {
     } kind = rands(0) % PLANET_VARIETY;
 
     CelestialBody planet = {0};
-    planet.position = mtx33MulVec(rotYA((float)(rands(0)%4096)), (Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
+    planet.position = iwc_mtx33MulVec(rotYA((float)(rands(0)%4096)), (iwc_Vec3){(rands(0)%10 + 4) * (rands(0)%10 + 4), 0, 0});
     planet.tag = generateName(currentSystemAllocator);
     planet.type = PLANET;
-    planet.info.planet.orbitLine = generateOrbitLine((Vec3){0, 0, 0}, planet.position);
+    planet.info.planet.orbitLine = generateOrbitLine((iwc_Vec3){0, 0, 0}, planet.position);
 
     uint32_t colorVarier[2] = {~(rands(0)|rands(0)), ~(rands(0)|rands(0))};
     colorVarier[0] &= 0x3f3f3f3f;
@@ -1255,7 +944,7 @@ uint64_t noiseMap[] = {
  * @param lightDir unit direction light comes from, from view perspective
  * @return whether high LOD
  */
-bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Vec3 lightDir) {
+bool drawPlanetSurface(iwc_Vec2 pos, float r, iwc_Vec2 texOffset, iwc_Mtx22 texTransform, iwc_Vec3 lightDir) {
     if (r < 4) {
         circ(pos.x, pos.y, r, 13);
         return false;
@@ -1263,7 +952,7 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
 
     circ(pos.x, pos.y, r, 5);
 
-    Vec2 lightNorm = v2Norm((Vec2){.x = lightDir.x, lightDir.y});
+    iwc_Vec2 lightNorm = iwc_v2Norm((iwc_Vec2){.x = lightDir.x, lightDir.y});
     float lightSlope = -lightNorm.x / lightNorm.y;
 
     float invR = 1/r;
@@ -1279,7 +968,7 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
         if (sj < 0) {j = -pos.y; continue;}
         if (sj >= HEIGHT) return true;
 
-        Vec2 ftex = mtx22MulVec(texTransform, (Vec2){
+        iwc_Vec2 ftex = iwc_mtx22MulVec(texTransform, (iwc_Vec2){
             (thisr2*i+i)*invR*invR*invR*8,
             (thisr2*j+j)*invR*invR*invR*8,
         });
@@ -1363,34 +1052,34 @@ bool drawPlanetSurface(Vec2 pos, float r, Vec2 texOffset, Mtx22 texTransform, Ve
 
 /** information relevant to rendering a celestial body */
 typedef struct {
-    Vec3 realPos;
-    Vec3 relPos;
-    Vec3 visPos;
+    iwc_Vec3 realPos;
+    iwc_Vec3 relPos;
+    iwc_Vec3 visPos;
     float dist;
     float distInv;
     float dz;
-    Vec2 screenspacePos;
+    iwc_Vec2 screenspacePos;
 } BodyVisualInfo;
-void initBodyVisualInfo(BodyVisualInfo* self, Vec3 bodyPos, Vec3 playerPos, Mtx33 invPlayerRot){
+void initBodyVisualInfo(BodyVisualInfo* self, iwc_Vec3 bodyPos, iwc_Vec3 playerPos, iwc_Mtx33 invPlayerRot){
     self->realPos = bodyPos;
-    self->relPos = v3Sub(bodyPos, playerPos);
-    self->visPos = mtx33MulVec(invPlayerRot, self->relPos);
-    self->dist = v3Len(self->relPos);
+    self->relPos = iwc_v3Sub(bodyPos, playerPos);
+    self->visPos = iwc_mtx33MulVec(invPlayerRot, self->relPos);
+    self->dist = iwc_v3Len(self->relPos);
     self->distInv = 1/self->dist;
     self->dz = HEIGHT / self->visPos.z;
-    self->screenspacePos = (Vec2){self->visPos.x*self->dz + FWIDTH/2, self->visPos.y*self->dz + FHEIGHT/2};
+    self->screenspacePos = (iwc_Vec2){self->visPos.x*self->dz + FWIDTH/2, self->visPos.y*self->dz + FHEIGHT/2};
 }
 
 /** common information relevant to rendering things from the player's perspective */
 typedef struct {
-    Mtx33 rot;
-    Mtx33 invRot;
-    Vec3 forward;
+    iwc_Mtx33 rot;
+    iwc_Mtx33 invRot;
+    iwc_Vec3 forward;
 } PlayerVisualInfo;
 void initPlayerVisualInfo(PlayerVisualInfo* self) {
     self->rot = player.rot;
-    self->invRot = invUnscaled(self->rot);
-    self->forward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
+    self->invRot = iwc_mtx33InvUnscaled(self->rot);
+    self->forward = iwc_mtx33MulVec(player.rot, (iwc_Vec3){0, 0, 1});
 }
 
 /**
@@ -1401,9 +1090,9 @@ void initPlayerVisualInfo(PlayerVisualInfo* self) {
  */
 void drawOrbitLine(PlayerVisualInfo const * pvi, OrbitLine const * orbitLine) {
     if (enabledMenuOpts & TOGGLEABLE_MENU_OPTION_ORRERY) {
-        Vec3 lastVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], player.pos));
+        iwc_Vec3 lastVisPoint = iwc_mtx33MulVec(pvi->invRot, iwc_v3Sub(orbitLine->points[ORBIT_LINE_RESOLUTION-1], player.pos));
         for (int i = 0; i<ORBIT_LINE_RESOLUTION; i++) {
-            Vec3 thisVisPoint = mtx33MulVec(pvi->invRot, v3Sub(orbitLine->points[i], player.pos));
+            iwc_Vec3 thisVisPoint = iwc_mtx33MulVec(pvi->invRot, iwc_v3Sub(orbitLine->points[i], player.pos));
             if (thisVisPoint.z > 0 || lastVisPoint.z > 0) {
                 float ldz = HEIGHT/lastVisPoint.z;
                 if (ldz < 0) ldz *= -1000;
@@ -1427,19 +1116,19 @@ void drawPlanet(PlayerVisualInfo const * pvi, BodyVisualInfo const * bvi, Planet
     drawOrbitLine(pvi, planet->orbitLine);
 
     if (bvi->visPos.z > 0) {
-        Vec3 visPole = v3Sub(mtx33MulVec(pvi->invRot, v3Add(bvi->relPos, (Vec3){0, 1, 0})), bvi->visPos);
-        Vec2 poleDir = v2Norm((Vec2){visPole.x, visPole.y});
-        Vec3 lightDir = v3Norm(mtx33MulVec(pvi->invRot, v3Sub((Vec3){0, 0, 0}, bvi->realPos)));
-        Mtx22 texTransform = (Mtx22){
+        iwc_Vec3 visPole = iwc_v3Sub(iwc_mtx33MulVec(pvi->invRot, iwc_v3Add(bvi->relPos, (iwc_Vec3){0, 1, 0})), bvi->visPos);
+        iwc_Vec2 poleDir = iwc_v2Norm((iwc_Vec2){visPole.x, visPole.y});
+        iwc_Vec3 lightDir = iwc_v3Norm(iwc_mtx33MulVec(pvi->invRot, iwc_v3Sub((iwc_Vec3){0, 0, 0}, bvi->realPos)));
+        iwc_Mtx22 texTransform = (iwc_Mtx22){
             poleDir.x, poleDir.y,
            -poleDir.y, poleDir.x,
         };
-        texTransform = mtx22Mul((Mtx22){planet->surfaceStretchFactor, 0, 0, 1/planet->surfaceStretchFactor}, texTransform);
+        texTransform = iwc_mtx22Mul((iwc_Mtx22){planet->surfaceStretchFactor, 0, 0, 1/planet->surfaceStretchFactor}, texTransform);
 
         bool highLOD = drawPlanetSurface(
             bvi->screenspacePos, 
             (FHEIGHT/2)*planet->radius*bvi->distInv, 
-            (Vec2){
+            (iwc_Vec2){
                 -asinf(bvi->relPos.y*bvi->distInv)*8, 
                 acosf(bvi->relPos.x*bvi->distInv)*(bvi->relPos.z<0?1:-1)*INV_PI*8
             },
@@ -1469,7 +1158,7 @@ void draw() {
     initPlayerVisualInfo(&pvi);
 
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
-        Vec3 vsPos = mtx33MulVec(pvi.invRot, skyboxStars[i]);
+        iwc_Vec3 vsPos = iwc_mtx33MulVec(pvi.invRot, skyboxStars[i]);
         if (vsPos.z <= 0) continue;
         float dz = HEIGHT / vsPos.z;
         pix(vsPos.x*dz + FWIDTH/2, vsPos.y*dz + FHEIGHT/2, 8);
@@ -1535,10 +1224,10 @@ void processInput() {
             if (triggerableMenuOptSelection<0) triggerableMenuOptSelection = 0;
             if (triggerableMenuOptSelection>=TRIGGERABLE_MENU_OPTION_COUNT) triggerableMenuOptSelection = TRIGGERABLE_MENU_OPTION_COUNT-1;
         } else {
-            if (btn(0)) {player.rot = mtx33Mul(player.rot, rotX(-0.01)); screenShake.y -= 3;}
-            if (btn(1)) {player.rot = mtx33Mul(player.rot, rotX( 0.01)); screenShake.y += 3;}
-            if (btn(2)) {player.rot = mtx33Mul(player.rot, rotZ(-0.01));}
-            if (btn(3)) {player.rot = mtx33Mul(player.rot, rotZ( 0.01));}
+            if (btn(0)) {player.rot = iwc_mtx33Mul(player.rot, rotX(-0.01)); screenShake.y -= 3;}
+            if (btn(1)) {player.rot = iwc_mtx33Mul(player.rot, rotX( 0.01)); screenShake.y += 3;}
+            if (btn(2)) {player.rot = iwc_mtx33Mul(player.rot, rotZ(-0.01));}
+            if (btn(3)) {player.rot = iwc_mtx33Mul(player.rot, rotZ( 0.01));}
         }
 
         {
@@ -1574,14 +1263,14 @@ WASM_EXPORT("BOOT")
 void BOOT() {
     initAllocators(&tickAllocator, &persistAllocator);
 
-    initBufferAllocator(&currentSystemAllocator, persistAllocator, 8192);
+    iwc_initStackBufferAllocator(&currentSystemAllocator, iwc_alloc(persistAllocator, 8192), 8192);
 
     for (int i = 0; i<SKYBOX_STAR_COUNT; i++) {
         float x = (float)rands(0) * ((rands(0)& 8)?-1:1);
         float y = (float)rands(0) * ((rands(0)& 4)?-1:1);
         float z = (float)rands(0) * ((rands(0)&32)?-1:1);
 
-        skyboxStars[i] = (Vec3){x, y, z};
+        skyboxStars[i] = (iwc_Vec3){x, y, z};
     }
 
     int nextOrbitLineIndex = 0;
@@ -1602,7 +1291,7 @@ void BOOT() {
     celestialBodies[5] = generatePlanet();
     celestialBodies[6] = generatePlanet();
 
-    player.inventory = aalloc(persistAllocator, sizeof(InventoryItemSlot) * PLAYER_INVENTORY_SIZE);
+    player.inventory = iwc_alloc(persistAllocator, sizeof(InventoryItemSlot) * PLAYER_INVENTORY_SIZE);
     // for testing
     player.inventory[3] = (InventoryItemSlot){
         .type = WATER,
@@ -1612,15 +1301,15 @@ void BOOT() {
 
 WASM_EXPORT("TIC")
 void TIC() {
-    screenShake = v2Scale(screenShake, 0.5);
+    screenShake = iwc_v2Scale(screenShake, 0.5);
 
     processInput();
 
     if (gameState == IN_WORLD) {
-        Mtx33 const invPlayerRot = invUnscaled(player.rot);
-        Vec3 const playerForward = mtx33MulVec(player.rot, (Vec3){0, 0, 1});
+        iwc_Mtx33 const invPlayerRot = iwc_mtx33InvUnscaled(player.rot);
+        iwc_Vec3 const playerForward = iwc_mtx33MulVec(player.rot, (iwc_Vec3){0, 0, 1});
 
-        player.pos = v3Add(player.pos, v3Scale(playerForward, player.speed*SECONDS_PER_FRAME));
+        player.pos = iwc_v3Add(player.pos, iwc_v3Scale(playerForward, player.speed*SECONDS_PER_FRAME));
     }
 
     cls(0);
@@ -1631,7 +1320,7 @@ void TIC() {
 
     frame++;
     lastButtonInputs = GAMEPADS[0];
-    aempty(tickAllocator);
+    iwc_empty(tickAllocator);
 }
 
 WASM_EXPORT("BDR")
@@ -1640,25 +1329,25 @@ void BDR() {
 
 #ifdef TESTING
 // for testing
-void printMtx(Mtx33 mtx) {
+void printMtx(iwc_Mtx33 mtx) {
     printf("|%8.4f\t%8.4f\t%8.4f|\n", mtx.aa, mtx.ab, mtx.ac);
     printf("|%8.4f\t%8.4f\t%8.4f|\n", mtx.ba, mtx.bb, mtx.bc);
     printf("|%8.4f\t%8.4f\t%8.4f|\n", mtx.ca, mtx.cb, mtx.cc);
 }
 int main() {
-    Mtx33 rx = rotX(0.3);
+    iwc_Mtx33 rx = rotX(0.3);
     printf("rx:\n");
     printMtx(rx);
 
-    Mtx33 ry = rotY(0.3);
+    iwc_Mtx33 ry = rotY(0.3);
     printf("ry:\n");
     printMtx(ry);
 
-    Mtx33 mul = mtx33Mul(rx, ry);
+    iwc_Mtx33 mul = iwc_mtx33Mul(rx, ry);
     printf("mul:\n");
     printMtx(mul);
 
-    Mtx33 invMul = invUnscaled(mul);
+    iwc_Mtx33 invMul = invUnscaled(mul);
     printf("invMul:\n");
     printMtx(invMul);
 
@@ -1685,7 +1374,7 @@ int main() {
 
     printf("%d\n", strlen("hello"));
 
-    char* str = aalloc(tickAllocator, 1);
+    char* str = iwc_alloc(tickAllocator, 1);
     *str = '\0';
 
     stringAppend(&str, "test 1");
@@ -1693,8 +1382,8 @@ int main() {
     stringAppend(&str, "test G");
     printf("%s\n", str);
 
-    afree(tickAllocator, str, strlen(str)+1);
-    str = aalloc(tickAllocator, 1);
+    iwc_free(tickAllocator, str, strlen(str)+1);
+    str = iwc_alloc(tickAllocator, 1);
     *str = '\0';
 
     stringAppend(&str, "hello,");

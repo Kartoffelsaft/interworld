@@ -1,0 +1,3 @@
+[submodule "iwclib"]
+	path = iwclib
+	url = git@github.com:Kartoffelsaft/iwclib
