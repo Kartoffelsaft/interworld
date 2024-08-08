@@ -271,39 +271,53 @@ float cosfa(float x) {
 
 // Documented in forward declaration
 int writeInt(char* buf, int x) {
+    bool doWrite = buf != NULL;
+    char* p = buf;
+
     if (x == 0) {
-        buf[0] = '0';
-        buf[1] = 0;
+        if (doWrite) {
+            p[0] = '0';
+            p[1] = 0;
+            p += 1;
+        }
+
         return 1;
     }
 
     bool negated = false;
     if (x < 0) {
         x *= -1;
-        *buf = '-';
-        buf++;
+        if (doWrite) *buf = '-';
+        p++;
         negated = true;
     }
 
-    char* p;
-    for (p = buf; x > 0; p++) {
+    for (; x > 0; p++) {
         int m = x%10;
         x /= 10;
-        *p = '0'+m;
+        if (doWrite) *p = '0'+m;
     }
     *p = 0;
 
-    int ret = p-buf + (negated? 1:0);
+    int ret = p-buf;
+    if (!doWrite) return ret;
 
     p--;
 
-    for (char* s = buf; s<p; s++,p--) {
+    for (char* s = buf + (negated? 1:0); s<p; s++,p--) {
         char tmp = *p;
         *p = *s;
         *s = tmp;
     }
 
     return ret;
+}
+
+char* intToString(int x) {
+    int len = writeInt(NULL, x);
+    char* out = iwc_alloc(tickAllocator, len+1);
+    writeInt(out, x);
+    return out;
 }
 
 /**
@@ -649,9 +663,9 @@ void drawFrontHud() {
         pix(WIDTH/2, HEIGHT/2, 3);
 
     } else if (gameState == IN_INVENTORY) {
-        drawUIBox(50, WIDTH-50, 10, HEIGHT-40, 10, 2);
-        drawUIBox(52, 110, 40, HEIGHT-42, 2, 3);
-        drawUIBox(112, WIDTH-52, 12, HEIGHT-42, 2, 3);
+        drawUIBox(50, WIDTH-50, 10, HEIGHT-35, 10, 2);
+        drawUIBox(52, 110, 40, HEIGHT-37, 2, 3);
+        drawUIBox(112, WIDTH-52, 12, HEIGHT-37, 2, 3);
 
         print("[Ship stats]", 54, 42, 10, false, 1, true);
 
@@ -659,10 +673,9 @@ void drawFrontHud() {
             InventoryItemIntrinsics const * iii = getItemIntrinsics(player.inventory[i].type);
             if (iii == NULL) continue;
 
-            char* buf = iwc_alloc(tickAllocator, 16); // TODO: make into to string that implicitly does it this way
-            writeInt(buf, player.inventory[i].amount);
-            print(buf, 114, 14 + 7*i, 10, false, 1, true);
-            print(iii->name, 124, 14 + 7*i, 10, false, 1, true);
+            print(intToString(player.inventory[i].amount), 114, 14 + 7*i, 10, true, 1, true);
+            print("x", 122, 14 + 7*i, 10, true, 1, true);
+            print(iii->name, 128, 14 + 7*i, 10, false, 1, true);
         }
     }
 }
@@ -1296,6 +1309,10 @@ void BOOT() {
     player.inventory[3] = (InventoryItemSlot){
         .type = WATER,
         .amount = 10,
+    };
+    player.inventory[11] = (InventoryItemSlot){
+        .type = WATER,
+        .amount = 8,
     };
 }
 
